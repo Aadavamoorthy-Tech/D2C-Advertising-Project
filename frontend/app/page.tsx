@@ -174,11 +174,11 @@ export default function Home() {
       body.append('file', file);
       const result = await request<Payload>('/api/datasets/ingest', { method: 'POST', body });
       setDataset(result);
-      setMessage(`${number(result.row_count)} rows validated and loaded. Dataset ID: ${result.dataset_id}`);
+      setMessage(`${number(result.row_count)} records validated and uploaded.`);
       setFile(null);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'CSV ingestion failed.');
+      setError(err instanceof Error ? err.message : 'Could not upload the CSV file.');
     } finally {
       setBusy(false);
     }
@@ -256,6 +256,46 @@ export default function Home() {
       : dataset?.status === 'ready' || dataset?.status === 'fixture'
         ? 'Healthy'
         : 'No dataset';
+  const quality = overview?.quality;
+  const missingRequiredValues = quality?.missing_required_values;
+  const missingValueCount = missingRequiredValues && typeof missingRequiredValues === 'object'
+    ? Object.values(missingRequiredValues).reduce((total: number, value) => total + Number(value || 0), 0)
+    : null;
+  const missingFieldCount = missingRequiredValues && typeof missingRequiredValues === 'object'
+    ? Object.values(missingRequiredValues).filter((value) => Number(value) > 0).length
+    : null;
+  const duplicateRecordCount = typeof quality?.duplicate_ids === 'number' ? quality.duplicate_ids : null;
+  const qualityChecked = duplicateRecordCount !== null && missingValueCount !== null;
+  const currencyNotConfigured = Boolean(quality?.currency_note);
+  const dataQualityStatus = loading
+    ? 'Checking'
+    : !qualityChecked
+      ? 'Not checked'
+      : duplicateRecordCount > 0 || missingValueCount > 0 || currencyNotConfigured
+        ? 'Needs Attention'
+        : 'Healthy';
+  const dataQualitySummary = !qualityChecked
+    ? 'Quality checks are not available.'
+    : duplicateRecordCount > 0
+      ? `${number(duplicateRecordCount)} duplicate records detected.`
+      : missingValueCount > 0
+        ? `${number(missingFieldCount)} required ${missingFieldCount === 1 ? 'field contains' : 'fields contain'} missing values.`
+        : currencyNotConfigured
+          ? 'Currency is not configured in the source data.'
+          : 'No major data-quality issues detected.';
+  const dataSourceName = health?.mode === 'live'
+    ? 'Exasol'
+    : dataset?.status === 'ready'
+      ? 'Uploaded CSV'
+      : health?.mode === 'demo'
+        ? 'Demo Dataset'
+        : 'Unavailable';
+  const connectionStatus = loading ? 'Checking' : health?.status === 'ok' ? 'Connected' : 'Disconnected';
+  const dataUpdatedAt = dataset?.ingested_at ? new Date(dataset.ingested_at) : lastUpdated;
+  const trendDates = (overview?.trend || []).map((item: Payload) => item.date).filter(Boolean);
+  const dataRange = trendDates.length
+    ? `${dateOnly(trendDates[0])} – ${dateOnly(trendDates[trendDates.length - 1])}`
+    : 'Not checked';
 
   return <div className="shell">
     <aside className="sidebar">
@@ -279,7 +319,7 @@ export default function Home() {
           <label className="select-group"><small>Period</small><select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={0}>All time</option><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option><option value={365}>Last 12 months</option></select></label>
           <label className="select-group"><small>Channel</small><select value={channel} onChange={(event) => setChannel(event.target.value)}><option value="">All channels</option>{channels.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
           <button className="icon-button" title={light ? 'Switch to dark theme' : 'Switch to light theme'} onClick={() => setLight(!light)}>{light ? <Moon size={16} /> : <Sun size={16} />}</button>
-          <div className="data-status" aria-label="Data source status">
+          {section === 'data' ? <button className="icon-button data-refresh" onClick={() => void refresh()} disabled={loading} title="Refresh Data" aria-label="Refresh Data"><RefreshCw size={14} className={loading ? 'spin' : ''} /></button> : <div className="data-status" aria-label="Data source status">
             <span className="data-status-source">
               <span className={`health-dot ${loading ? 'checking' : health?.status === 'ok' ? '' : 'offline'}`} />
               Data source: <strong>{sourceLabel}</strong>
@@ -289,11 +329,11 @@ export default function Home() {
             <button className="icon-button data-refresh" onClick={() => void refresh()} disabled={loading} title="Refresh data" aria-label="Refresh data">
               <RefreshCw size={14} className={loading ? 'spin' : ''} />
             </button>
-          </div>
+          </div>}
         </div>
       </header>
 
-      <section className="content">
+      <section className={`content ${section === 'data' ? 'data-hub' : ''}`}>
         {error && <div className="notice error" role="alert"><TriangleAlert size={16} /><span>{error}</span><button onClick={() => void refresh()} aria-label="Retry"><RefreshCw size={14} /> Retry</button></div>}
         {message && <div className="notice success" role="status"><Check size={16} />{message}<button onClick={() => setMessage('')} aria-label="Dismiss"><X size={14} /></button></div>}
 
@@ -341,21 +381,49 @@ export default function Home() {
               <Observation title="Evidence limitation" value="No causal conclusion" detail="The dataset has no comparison design that can show why a metric changed." /></div> : <Empty text={error || 'Load a dataset to see observations.'} />}
           </section><div className="notice neutral"><CircleHelp size={15} /><span>AI is restricted to summaries in this version. It does not diagnose root causes or generate recommendations.</span></div></>}
 
-        {section === 'data' && <><div className="page-heading"><div><div className="eyebrow">INGESTION & VALIDATION</div><h1>Unified data hub</h1><p>Load a CSV into Exasol, or use an explicitly enabled local fixture demo.</p></div><span className={`status-tag ${dataset?.status === 'ready' || dataset?.status === 'fixture' ? 'green' : 'amber'}`}>{dataset?.status || 'CHECKING'}</span></div>
-          <div className="dashboard-grid data-grid"><section className="panel"><div className="panel-head"><div><h2>Upload campaign CSV</h2><p>Expected: the supplied 37-column dataset layout. Maximum upload size is configured on the backend.</p></div><CloudUpload size={18} /></div>
-              <form className="upload-form" onSubmit={(event) => void uploadCsv(event)}><label className="dropzone"><FileSpreadsheet size={23} /><b>{file?.name || 'Choose a CSV file'}</b><small>CSV only · all required columns must be present</small><input type="file" accept=".csv,text/csv" onChange={(event: ChangeEvent<HTMLInputElement>) => setFile(event.target.files?.[0] || null)} /></label><button className="sync-button" disabled={!file || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Upload size={14} />} Validate & ingest</button></form>
-            </section><section className="panel"><div className="panel-head"><div><h2>Current dataset</h2><p>Source status and latest ingestion</p></div><Layers3 size={17} /></div>
-              <QualityRow label="Environment" value={health?.mode === 'demo' ? 'Fixture-backed demo' : health?.mode === 'live' ? 'Live Exasol' : 'Unavailable'} />
-              <QualityRow label="Status" value={dataset?.status || 'Unknown'} />
-              <QualityRow label="Rows" value={number(dataset?.row_count)} />
-              <QualityRow label="Last ingestion" value={dataset?.ingested_at ? new Date(dataset.ingested_at).toLocaleString() : dataset?.source || '—'} />
-              <p className="panel-foot">This upload replaces the active dataset table. An identical file is recognized by its content hash and is not reloaded.</p>
-            </section></div>
-            <section className="panel"><div className="panel-head"><div><h2>Data Quality</h2><p>Record quality and known dataset limitations</p></div></div>
-              <QualityRow label="Records in view" value={number(overview?.quality?.rows)} />
-              <QualityRow label="Duplicate IDs" value={number(overview?.quality?.duplicate_ids)} warning={Number(overview?.quality?.duplicate_ids || 0) > 0} />
-              {dataset && Array.isArray(dataset.warnings) && dataset.warnings.map((warning: string) => <div className="quality-row" key={warning}><CircleHelp size={14} /><span>{warning}</span></div>)}
+        {section === 'data' && <>
+          <div className="page-heading data-hub-heading">
+            <div><h1>Unified Data Hub</h1><p>Review connected data sources, dataset structure and data quality.</p></div>
+          </div>
+          <section className="panel data-source-summary">
+            <div className="panel-head"><div><h2>Data Source</h2></div><Database size={17} /></div>
+            <div className="data-source-grid">
+              <div><span>Source</span><strong>{dataSourceName}</strong></div>
+              <div><span>Status</span><strong className={connectionStatus === 'Connected' ? 'data-value-healthy' : 'data-value-warning'}>{connectionStatus}</strong></div>
+              <div><span>Last Updated</span><strong>{dataUpdatedAt ? dataUpdatedAt.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</strong></div>
+              <div><span>Total Records</span><strong>{dataset?.row_count == null ? 'Not available' : number(dataset.row_count)}</strong></div>
+            </div>
+          </section>
+          <div className="data-hub-layout">
+            <section className="panel data-quality-panel">
+              <div className="panel-head"><div><h2>Data Quality</h2><p>Quality checks for the current data view</p></div></div>
+              <div className="data-quality-overview">
+                <span className={`data-quality-status ${dataQualityStatus.toLowerCase().replace(/\s+/g, '-')}`}>{dataQualityStatus}</span>
+                <p>{dataQualitySummary}</p>
+              </div>
+              <div className="data-quality-grid">
+                <div><span>Filtered Records</span><strong>{quality?.rows == null ? 'Not checked' : number(quality.rows)}</strong></div>
+                <div><span>Duplicate Records</span><strong>{duplicateRecordCount == null ? 'Not checked' : number(duplicateRecordCount)}</strong></div>
+                <div><span>Missing Values</span><strong>{missingValueCount == null ? 'Not checked' : number(missingValueCount)}</strong></div>
+                <div><span>Date Range</span><strong>{dataRange}</strong></div>
+                <div><span>Currency</span><strong className={currencyNotConfigured ? 'data-value-warning' : ''}>{currencyNotConfigured ? 'Not configured' : 'Not checked'}</strong></div>
+              </div>
+              {missingRequiredValues && Object.entries(missingRequiredValues).some(([, value]) => Number(value) > 0) && <div className="data-quality-notes">
+                {Object.entries(missingRequiredValues).filter(([, value]) => Number(value) > 0).map(([field, count]) => <div key={field}>{field.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())}: {number(Number(count))} missing</div>)}
+              </div>}
+              {dataset && Array.isArray(dataset.warnings) && dataset.warnings.length > 0 && <details className="data-quality-disclosure">
+                <summary>Data Notes ({dataset.warnings.length})</summary>
+                <ul>{dataset.warnings.map((warning: string) => <li key={warning}>{warning}</li>)}</ul>
+              </details>}
             </section>
+            <section className="panel data-upload-panel">
+              <div className="panel-head"><div><h2>Manage Data</h2><p>Upload a campaign CSV to replace the current dataset.</p></div><CloudUpload size={18} /></div>
+              <form className="upload-form" onSubmit={(event) => void uploadCsv(event)}>
+                <label className="dropzone"><FileSpreadsheet size={20} /><b>{file?.name || 'Choose a CSV file'}</b><small>CSV files only</small><input type="file" accept=".csv,text/csv" onChange={(event: ChangeEvent<HTMLInputElement>) => setFile(event.target.files?.[0] || null)} /></label>
+                <button className="sync-button" disabled={!file || busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Upload size={14} />}{busy ? 'Uploading…' : 'Upload CSV'}</button>
+              </form>
+            </section>
+          </div>
         </>}
 
         {section === 'summary' && <><div className="page-heading"><div><div className="eyebrow">AI · SUMMARIZATION ONLY</div><h1>Dataset summary</h1><p>The AI describes patterns in the data. It does not diagnose causes or recommend actions.</p></div><button className="sync-button" onClick={() => void generateSummary()} disabled={busy || !overview}><Sparkles size={15} />{busy ? 'Summarizing…' : 'Summarize all rows'}</button></div>
