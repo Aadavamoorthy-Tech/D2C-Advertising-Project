@@ -289,7 +289,7 @@ export default function Home() {
         {message && <div className="notice success" role="status"><Check size={16} />{message}<button onClick={() => setMessage('')} aria-label="Dismiss"><X size={14} /></button></div>}
 
         {section === 'overview' && <>
-          <div className="page-heading"><div><div className="eyebrow">AS OF {new Date().toLocaleDateString('en-US')} · {overview?.is_demo ? 'ILLUSTRATIVE CSV DATA' : 'OBSERVED EXASOL DATA'}</div><h1>Good morning, Avery.</h1><p>Here’s what moved across your campaign portfolio.</p></div><span className={`status-tag ${health?.status === 'ok' ? 'green' : 'amber'}`}><i />{health?.mode === 'demo' ? 'Fixture-backed demo' : health?.status === 'ok' ? 'Exasol live data' : 'Data unavailable'}</span></div>
+          <div className="page-heading"><div><div className="eyebrow">Last updated: {lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</div><h1>Good morning, Avery.</h1><p>Here’s what moved across your campaign portfolio.</p></div></div>
           {loading ? <div className="state-card"><LoaderCircle className="spin" />Loading campaign data…</div> : metrics && <div className="stats-grid">
             <Stat icon={<BarChart3 size={16} />} label="Total ad spend" value={money(metrics.spend)} note="Observed · currency unspecified" />
             <Stat icon={<TrendingUp size={16} />} label="Attributed revenue" value={money(metrics.attributed_revenue)} note="Not reconciled · currency unspecified" />
