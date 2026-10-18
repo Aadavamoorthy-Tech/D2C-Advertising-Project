@@ -320,7 +320,7 @@ export default function Home() {
               </div>
             </section>
           </div>
-          <section className="panel channel-panel"><div className="panel-head"><div><h2>Channel performance</h2><p>Aggregated from records in the current filter window</p></div><span className="mini-tag">{overview?.channels?.length || 0} CHANNELS</span></div>
+          <section className="panel channel-panel"><div className="panel-head"><div><h2>Channel performance</h2><p>Compare advertising performance across channels.</p></div><span className="mini-tag">{overview?.channels?.length || 0} CHANNELS</span></div>
             <div className="table-scroll"><table><thead><tr><th>CHANNEL</th><th>RECORDS</th><th>SPEND</th><th>ATTRIBUTED REVENUE</th><th>RETURN-ADJUSTED PROFIT</th><th>ROAS</th></tr></thead><tbody>{(overview?.channels || []).map((item: Payload) => <tr key={item.channel}><td><b>{item.channel}</b></td><td>{number(item.record_count)}</td><td>{money(item.spend)}</td><td>{money(item.attributed_revenue)}</td><td>{money(item.return_adjusted_net_profit)}</td><td><span className="roas">{ratio(item.roas)}</span></td></tr>)}</tbody></table></div>
           </section>
           <div className="notice neutral"><CircleHelp size={15} /><span>No inferred causes, automated budget allocations, or live ad-account changes are generated. This dashboard reports the supplied metrics and summarizes them with AI on request.</span></div>
