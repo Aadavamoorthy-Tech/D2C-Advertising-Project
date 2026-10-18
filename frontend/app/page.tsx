@@ -354,7 +354,6 @@ export default function Home() {
             <section className="panel"><div className="panel-head"><div><h2>Data Quality</h2><p>Record quality and known dataset limitations</p></div></div>
               <QualityRow label="Records in view" value={number(overview?.quality?.rows)} />
               <QualityRow label="Duplicate IDs" value={number(overview?.quality?.duplicate_ids)} warning={Number(overview?.quality?.duplicate_ids || 0) > 0} />
-              <QualityRow label="Currency" value={overview?.quality?.currency_note || 'Not specified'} warning />
               {dataset && Array.isArray(dataset.warnings) && dataset.warnings.map((warning: string) => <div className="quality-row" key={warning}><CircleHelp size={14} /><span>{warning}</span></div>)}
             </section>
         </>}
