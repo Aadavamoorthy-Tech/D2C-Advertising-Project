@@ -514,14 +514,6 @@ export default function Home() {
     { label: 'Data Health', value: !qualityChecked ? 'Not checked' : dataWarning ? 'Needs Attention' : 'Healthy', tone: !qualityChecked ? 'neutral' : dataWarning ? 'warn' : 'good' },
     { label: 'Decision Engine', value: decisionsReady ? 'Ready' : 'Limited', tone: decisionsReady ? 'good' : 'warn' },
   ];
-  const quickActions: { label: string; target: Section; icon: typeof Gauge }[] = [
-    { label: 'Explore Performance', target: 'campaigns', icon: BarChart3 },
-    { label: 'Review Anomalies', target: 'insights', icon: TriangleAlert },
-    { label: 'View Opportunities', target: 'opportunities', icon: Target },
-    { label: 'Open Decision Center', target: 'decisions', icon: Check },
-    { label: 'Run Budget Simulation', target: 'optimizer', icon: TrendingUp },
-    { label: 'Ask AI Copilot', target: 'copilot', icon: Command },
-  ];
 
   return <div className="shell">
     <aside className="sidebar">
@@ -591,9 +583,6 @@ export default function Home() {
             <section className="panel ac-panel ac-health"><div className="panel-head"><div><h2>System Health</h2></div></div>
               {healthRows.map((row) => <div className="ac-health-row" key={row.label}><span>{row.label}</span><b className={`ac-tone ${row.tone}`}>{row.value}</b></div>)}
               <button type="button" className="ac-more" onClick={() => goTo('data')}>View Data Details <ArrowRight size={12} /></button>
-            </section>
-            <section className="panel ac-panel ac-quick"><div className="panel-head"><div><h2>Quick Actions</h2></div></div>
-              <div className="ac-quick-grid">{quickActions.map((action) => { const Icon = action.icon; return <button type="button" key={action.label} onClick={() => goTo(action.target)}><Icon size={15} />{action.label}</button>; })}</div>
             </section>
           </div>
           <p className="ac-note">Insights are based on available campaign data. No live advertising changes are made automatically.</p>
