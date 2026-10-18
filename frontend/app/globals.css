@@ -23,7 +23,7 @@ select{color-scheme:dark}body[data-theme="light"] select{color-scheme:light}sele
 .data-health-panel .panel-head{min-height:48px;padding-block:10px}
 .data-health-content{padding:0 15px 12px}
 .data-health-status{display:block;margin:0 0 7px;font-size:13px;font-weight:650;color:var(--green)}
-.data-health-status.unavailable,.data-health-status.no-dataset{color:var(--amber)}
+.data-health-status.unavailable,.data-health-status.no-dataset,.data-health-status.data-quality-issue-detected{color:var(--amber)}
 .data-health-status.checking{color:var(--muted)}
 .data-health-detail{display:flex;justify-content:space-between;gap:8px;padding:5px 0;color:var(--muted);font-size:9px}
 .data-health-detail b{color:var(--muted2);font:9px var(--mono);text-align:right}

@@ -251,6 +251,8 @@ export default function Home() {
     ? 'Checking'
     : health?.status !== 'ok'
       ? 'Unavailable'
+      : Number(overview?.quality?.duplicate_ids || 0) > 0
+        ? 'Data quality issue detected'
       : dataset?.status === 'ready' || dataset?.status === 'fixture'
         ? 'Healthy'
         : 'No dataset';
@@ -311,7 +313,7 @@ export default function Home() {
             </section>
             <section className="panel source-panel data-health-panel"><div className="panel-head"><div><h2>Data Health</h2></div><Database size={17} /></div>
               <div className="data-health-content">
-                <strong className={`data-health-status ${dataHealthStatus.toLowerCase().replace(' ', '-')}`}>{dataHealthStatus}</strong>
+                <strong className={`data-health-status ${dataHealthStatus.toLowerCase().replace(/\s+/g, '-')}`}>{dataHealthStatus}</strong>
                 <div className="data-health-detail"><span>Source</span><b>{health?.mode === 'live' ? 'Exasol' : dataset?.status === 'ready' ? 'Uploaded CSV' : 'Demo Dataset'}</b></div>
                 <div className="data-health-detail"><span>Last updated</span><b>{lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</b></div>
                 <button type="button" className="data-health-link" onClick={() => { setSection('data'); setError(''); }}>View details <ArrowRight size={13} /></button>
