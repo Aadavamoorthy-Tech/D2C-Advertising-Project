@@ -810,7 +810,7 @@ export default function Home() {
               <button type="button" className="ac-more" onClick={() => goTo('data')}>View Data Details <ArrowRight size={12} /></button>
             </section>
           </div>
-          <DatabaseStartControl onComplete={refresh} />
+          {health?.mode === 'live' && <DatabaseStartControl onComplete={refresh} />}
           <p className="ac-note">Insights are based on available campaign data. No live advertising changes are made automatically.</p>
         </>}
 
