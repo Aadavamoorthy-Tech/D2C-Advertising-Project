@@ -175,16 +175,26 @@ class DatabaseHelper:
             self._set_step(job_id, "updating_render", "Checking Render's EXASOL_DSN and deployment state.")
             nrs.require_render_config(self.cfg)
             client = nrs.RenderClient(self.cfg)
+            demo_mode = client.get_env(nrs.DEMO_MODE_ENV_VAR_NAME)
+            demo_mode_enabled = (demo_mode or "").strip().lower() in {"1", "true", "yes"}
+            sync_state = store.load()
+            live_mode_pending = bool(sync_state.get("live_mode_pending"))
+            if demo_mode_enabled or live_mode_pending:
+                sync_state["live_mode_pending"] = True
+                store.save(sync_state)
+            if demo_mode_enabled:
+                client.put_env("0", key=nrs.DEMO_MODE_ENV_VAR_NAME)
             result = nrs.sync_once(
                 self.cfg,
                 client,
                 store,
                 hostport,
+                force_deploy=demo_mode_enabled or live_mode_pending,
                 out=lambda _message: None,
                 on_stage=lambda step: self._set_step(
                     job_id,
                     step,
-                    "Updating only EXASOL_DSN on Render." if step == "updating_render"
+                    "Enabling live Exasol data and syncing Render." if step == "updating_render"
                     else "Waiting for the Render deployment.",
                 ),
             )
@@ -207,19 +217,23 @@ class DatabaseHelper:
                 )
                 if status != "live":
                     raise RuntimeError("Render deployment did not become live.")
-
-            self._set_step(job_id, "verifying", "Verifying a real query against DQPS.RAW_D2C_DATA.")
-            verified, _detail = nrs.verify_database_query(
-                f"{self.backend_url}/api/datasets/status"
+            self._set_step(job_id, "verifying", "Verifying live Exasol data through the deployed backend.")
+            verified, detail = nrs.verify_database_query(
+                f"{self.backend_url}/api/db/start/verify",
+                require_live_mode=True,
             )
             if not verified:
-                raise RuntimeError("The live Exasol dataset query could not be verified.")
+                raise RuntimeError(f"The live Exasol dataset query could not be verified: {detail}")
+            if demo_mode_enabled or live_mode_pending:
+                sync_state = store.load()
+                sync_state.pop("live_mode_pending", None)
+                store.save(sync_state)
 
     def _run_job(self, job_id: str) -> None:
         try:
             self._set_step(job_id, "requested", "The laptop helper accepted the database-start request.")
             self._execute_sync(job_id)
-            self._set_step(job_id, "done", "Exasol is reachable through ngrok and the live dataset query succeeded.")
+            self._set_step(job_id, "done", "Dashboard is now reading the verified live dataset from Exasol.")
             self.logger.info("Database start job completed.")
         except Exception as exc:
             interrupted = isinstance(exc, RuntimeError) and "interrupted" in str(exc).lower()
