@@ -193,7 +193,7 @@ function DatabaseStartControl({ onComplete }: { onComplete: () => Promise<void> 
     <div className="db-start-copy">
       <div className="db-start-eyebrow"><Database size={14} /> LOCAL DATABASE</div>
       <h2 id="db-start-heading">Start database</h2>
-      <p>Start Exasol on the configured laptop, bring up its ngrok tunnel, sync Render, and verify the live dataset.</p>
+      <p>Start Exasol on the configured laptop, bring up its ngrok tunnel, sync Render, and verify the live dataset. CSV demo data remains active until live mode is configured.</p>
       {helperOffline && <p className="db-start-hint">The laptop must be on, awake, online, and running the D2C Exasol helper.</p>}
       {status?.state === 'running' && <ol className="db-start-steps" aria-label="Database startup progress">
         {dbStartSteps.map(([step, label], index) => {
@@ -810,7 +810,7 @@ export default function Home() {
               <button type="button" className="ac-more" onClick={() => goTo('data')}>View Data Details <ArrowRight size={12} /></button>
             </section>
           </div>
-          {health?.mode === 'live' && <DatabaseStartControl onComplete={refresh} />}
+          {health?.mode === 'demo' && <DatabaseStartControl onComplete={refresh} />}
           <p className="ac-note">Insights are based on available campaign data. No live advertising changes are made automatically.</p>
         </>}
 
