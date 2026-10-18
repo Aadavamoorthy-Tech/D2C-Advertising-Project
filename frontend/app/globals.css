@@ -58,3 +58,34 @@ select{color-scheme:dark}body[data-theme="light"] select{color-scheme:light}sele
 .data-hub .dropzone{min-height:82px;min-width:0}
 .data-hub .upload-form .sync-button{align-self:flex-end}
 @media(max-width:760px){.data-source-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.data-hub-layout{grid-template-columns:1fr}.data-quality-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.explorer-meta{display:flex;align-items:center;gap:12px;color:var(--muted);font:9px var(--mono)}
+.explorer-filters{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 12px;margin-bottom:12px}
+.explorer-filters label{display:grid;gap:4px;color:var(--muted);font-size:9.5px}
+.explorer-filters select{height:32px;min-width:138px;padding:0 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);font-size:10.5px}
+.filter-chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-left:4px;padding-bottom:3px}
+.filter-chips button{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 8px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);color:var(--text);font-size:10px}
+.filter-chips .reset-filters{border:0;background:transparent;color:var(--muted);text-decoration:underline}
+.explorer-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;margin-bottom:12px;border:1px solid var(--line);border-radius:10px;background:var(--line);overflow:hidden}
+.explorer-kpis>div{display:grid;gap:4px;padding:10px 14px;background:var(--panel)}
+.explorer-kpis span{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:10px}
+.explorer-kpis strong{font:600 18px var(--display)}
+.explorer-panel{margin-bottom:12px}
+.explorer-panel .panel-head{min-height:48px;padding-block:10px;align-items:center}
+.metric-tabs{display:flex;flex-wrap:wrap;gap:2px;padding:2px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.metric-tabs button{height:26px;padding:0 10px;border:0;border-radius:6px;background:transparent;color:var(--muted);font-size:10.5px}
+.metric-tabs button.active{background:var(--panel2);color:var(--text);font-weight:600}
+.explorer-chart{height:250px}
+.explorer-chart .spark-svg{height:200px}
+.explorer-chart .chart-foot{font-size:10px}
+.explorer-table th,.explorer-table td{white-space:nowrap}
+.explorer-table th.num,.explorer-table td.num{text-align:right}
+.explorer-table td.num{position:relative;font-variant-numeric:tabular-nums}
+.explorer-table td small{display:block;color:var(--muted);font-size:9.5px}
+.explorer-table td .bar{position:absolute;left:12px;bottom:4px;height:3px;max-width:calc(100% - 24px);border-radius:2px;background:var(--lime);opacity:.55}
+.explorer-table .table-empty{text-align:center;color:var(--muted)}
+.sort-button{padding:0;border:0;background:transparent;color:inherit;font-family:var(--mono);font-size:inherit;font-weight:inherit;text-transform:inherit;letter-spacing:inherit;display:inline-flex;gap:4px;cursor:pointer}
+.sort-button.active{color:var(--text)}
+.explorer-table .chart-info{margin-left:3px;vertical-align:middle}
+.explorer-panel .table-scroll{overflow-x:auto}
+.explorer-table td:first-child,.explorer-table th:first-child{position:sticky;left:0;background:var(--panel);z-index:1}
+@media(max-width:760px){.explorer-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.explorer-meta{flex-wrap:wrap}.explorer-filters label{flex:1 1 140px}.explorer-filters select{width:100%}.explorer-chart{height:220px}.explorer-chart .spark-svg{height:170px}}

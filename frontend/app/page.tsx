@@ -19,7 +19,7 @@ type Section =
 const navItems: { id: Section; label: string; group: string; icon: typeof Gauge }[] = [
   { id: 'overview', label: 'Command center', group: 'WORKSPACE', icon: Gauge },
   { id: 'data', label: 'Unified data hub', group: 'WORKSPACE', icon: Database },
-  { id: 'campaigns', label: 'Performance explorer', group: 'INTELLIGENCE', icon: BarChart3 },
+  { id: 'campaigns', label: 'Performance Explorer', group: 'INTELLIGENCE', icon: BarChart3 },
   { id: 'insights', label: 'Anomaly & diagnosis', group: 'INTELLIGENCE', icon: TriangleAlert },
   { id: 'opportunities', label: 'Opportunity radar', group: 'INTELLIGENCE', icon: Target },
   { id: 'decisions', label: 'Decision center', group: 'DECISIONING', icon: Target },
@@ -60,7 +60,63 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
-function AreaLine({ values }: { values: number[] }) {
+function fullNumber(value: number | null | undefined, digits = 0) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: digits }).format(Number(value));
+}
+function roasText(value: number | null | undefined) {
+  return value == null || !Number.isFinite(Number(value)) ? '—' : `${Number(value).toFixed(2)}x`;
+}
+
+type SortKey = 'name' | 'spend' | 'revenue' | 'profit' | 'roas';
+type SortState = { key: SortKey; dir: 'asc' | 'desc' };
+const sortValue: Record<SortKey, (row: Payload) => number | string | null> = {
+  name: (row) => String(row.campaign_id ?? row.channel ?? ''),
+  spend: (row) => row.spend,
+  revenue: (row) => row.attributed_revenue,
+  profit: (row) => row.return_adjusted_net_profit,
+  roas: (row) => row.roas,
+};
+function sortRows(rows: Payload[], sort: SortState) {
+  const get = sortValue[sort.key];
+  const factor = sort.dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const x = get(a);
+    const y = get(b);
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (typeof x === 'string' || typeof y === 'string' ? String(x).localeCompare(String(y)) : Number(x) - Number(y)) * factor;
+  });
+}
+
+type TrendMetric = 'revenue' | 'spend' | 'profit' | 'roas';
+const trendMetrics: { id: TrendMetric; label: string; color: string }[] = [
+  { id: 'revenue', label: 'Revenue', color: 'var(--lime)' },
+  { id: 'spend', label: 'Spend', color: '#6fb5e8' },
+  { id: 'profit', label: 'Adjusted Profit', color: '#4fc58a' },
+  { id: 'roas', label: 'ROAS', color: 'var(--amber)' },
+];
+const periodLabels: Record<number, string> = { 0: 'All time', 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last 12 months' };
+const metricHelp = {
+  revenue: 'Revenue attributed to advertising according to the supplied campaign data.',
+  profit: 'Return-adjusted profit as supplied in the campaign data.',
+  roas: 'ROAS = Attributed Revenue ÷ Ad Spend',
+};
+
+function Info({ text, label }: { text: string; label: string }) {
+  return <button type="button" className="chart-info" title={text} aria-label={label}><CircleHelp size={13} /></button>;
+}
+
+function SortHead({ label, field, sort, onSort, info }: { label: string; field: SortKey; sort: SortState; onSort: (key: SortKey) => void; info?: string }) {
+  const active = sort.key === field;
+  return <th aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'} className={field === 'name' ? '' : 'num'}>
+    <button type="button" className={`sort-button ${active ? 'active' : ''}`} onClick={() => onSort(field)}>{label}<span aria-hidden="true">{active ? (sort.dir === 'asc' ? '↑' : '↓') : ''}</span></button>
+    {info && <Info text={info} label={`About ${label}`} />}
+  </th>;
+}
+
+function AreaLine({ values, color = 'var(--lime)' }: { values: number[]; color?: string }) {
   const min = Math.min(...values);
   const max = Math.max(...values);
   const span = max - min;
@@ -69,9 +125,9 @@ function AreaLine({ values }: { values: number[] }) {
     return `${values.length <= 1 ? 50 : (i * 100) / (values.length - 1)},${y}`;
   }).join(' ');
   return <svg className="spark-svg" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Recent daily performance trend">
-    <polyline points={points} fill="none" stroke="var(--lime)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+    <polyline points={points} fill="none" stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
     <polygon points={`0,100 ${points} 100,100`} fill="url(#trend-fill)" />
-    <defs><linearGradient id="trend-fill" x1="0" x2="0" y1="0" y2="1"><stop stopColor="var(--lime)" stopOpacity=".22" /><stop offset="1" stopColor="var(--lime)" stopOpacity="0" /></linearGradient></defs>
+    <defs><linearGradient id="trend-fill" x1="0" x2="0" y1="0" y2="1"><stop stopColor={color} stopOpacity=".22" /><stop offset="1" stopColor={color} stopOpacity="0" /></linearGradient></defs>
   </svg>;
 }
 
@@ -86,6 +142,11 @@ export default function Home() {
   const [history, setHistory] = useState<Payload[]>([]);
   const [channels, setChannels] = useState<string[]>([]);
   const [channel, setChannel] = useState('');
+  const [campaign, setCampaign] = useState('');
+  const [campaignOptions, setCampaignOptions] = useState<string[]>([]);
+  const [trendMetric, setTrendMetric] = useState<TrendMetric>('revenue');
+  const [channelSort, setChannelSort] = useState<SortState>({ key: 'revenue', dir: 'desc' });
+  const [campaignSort, setCampaignSort] = useState<SortState>({ key: 'revenue', dir: 'desc' });
   const [days, setDays] = useState(0);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -109,8 +170,9 @@ export default function Home() {
     if (dateRange.from) query.set('date_from', dateRange.from);
     if (dateRange.to) query.set('date_to', dateRange.to);
     if (channel) query.set('channel', channel);
+    if (campaign && section === 'campaigns') query.set('campaign', campaign);
     return query.toString();
-  }, [channel, dateRange]);
+  }, [channel, dateRange, campaign, section]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -126,6 +188,7 @@ export default function Home() {
       setOverview(overviewData);
       setDataset(statusData);
       setChannels(filterData.channels || []);
+      setCampaignOptions(filterData.campaigns || []);
       setLastUpdated(new Date());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load dashboard data.');
@@ -137,13 +200,20 @@ export default function Home() {
 
   const loadCampaigns = useCallback(async () => {
     try {
-      const query = new URLSearchParams({ page: String(page), page_size: '15', ...Object.fromEntries(new URLSearchParams(filterQuery)) });
-      if (search) query.set('search', search);
-      setCampaigns(await request<Payload>(`/api/campaigns?${query.toString()}`));
+      const query = new URLSearchParams(filterQuery);
+      query.set('page_size', '100');
+      const items: Payload[] = [];
+      for (let current = 1; current <= 50; current += 1) {
+        query.set('page', String(current));
+        const data = await request<Payload>(`/api/campaigns?${query.toString()}`);
+        items.push(...(data.items || []));
+        if (!data.items?.length || items.length >= data.total) break;
+      }
+      setCampaigns({ items, total: items.length });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load campaign data.');
     }
-  }, [filterQuery, page, search]);
+  }, [filterQuery]);
 
   const loadDecisions = useCallback(async () => {
     try {
@@ -222,10 +292,10 @@ export default function Home() {
 
   async function exportCampaigns() {
     try {
-      const rows = campaigns?.items || [];
+      const rows = visibleCampaigns;
       if (!rows.length) return;
-      const columns = Object.keys(rows[0]);
-      const csv = [columns.join(','), ...rows.map((row: Payload) => columns.map((column) => JSON.stringify(row[column] ?? '')).join(','))].join('\n');
+      const columns = ['Campaign', 'SKU', 'Platform', 'Channel', 'Spend', 'Revenue', 'Adjusted Profit', 'ROAS'];
+      const csv = [columns.join(','), ...rows.map((row: Payload) => [row.campaign_id, row.sku_id, row.ad_platform, row.channel, row.spend, row.attributed_revenue, row.return_adjusted_net_profit, row.roas].map((value) => JSON.stringify(value ?? '')).join(','))].join('\n');
       const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
       const anchor = document.createElement('a');
       anchor.href = url;
@@ -238,6 +308,33 @@ export default function Home() {
   }
 
   const metrics = overview?.metrics;
+  const filtersActive = days !== 0 || Boolean(channel) || Boolean(campaign);
+  const resetFilters = () => { setDays(0); setChannel(''); setCampaign(''); setSearch(''); setPage(1); };
+  const trendRows: Payload[] = overview?.trend || [];
+  const trendSeries = trendRows.map((item: Payload) => {
+    if (trendMetric === 'roas') return item.spend ? Number(item.revenue || 0) / Number(item.spend) : 0;
+    if (trendMetric === 'spend') return Number(item.spend || 0);
+    if (trendMetric === 'profit') return Number(item.return_adjusted_profit || 0);
+    return Number(item.revenue || 0);
+  });
+  const activeTrend = trendMetrics.find((item) => item.id === trendMetric) ?? trendMetrics[0];
+  const formatTrend = (value: number) => (trendMetric === 'roas' ? roasText(value) : fullNumber(value));
+  const sortedChannels = useMemo(() => sortRows(overview?.channels || [], channelSort), [overview, channelSort]);
+  const channelMax = Math.max(0, ...sortedChannels.map((row) => Math.abs(Number(sortValue[channelSort.key === 'name' ? 'revenue' : channelSort.key](row)) || 0)));
+  const visibleCampaigns = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    const rows: Payload[] = campaigns?.items || [];
+    const filtered = term ? rows.filter((row) => [row.campaign_id, row.sku_id, row.ad_platform, row.channel].some((value) => String(value ?? '').toLowerCase().includes(term))) : rows;
+    return sortRows(filtered, campaignSort);
+  }, [campaigns, search, campaignSort]);
+  const campaignPageSize = 15;
+  const campaignPages = Math.max(1, Math.ceil(visibleCampaigns.length / campaignPageSize));
+  const campaignPage = Math.min(page, campaignPages);
+  const pagedCampaigns = visibleCampaigns.slice((campaignPage - 1) * campaignPageSize, campaignPage * campaignPageSize);
+  const toggleSort = (setter: (value: SortState | ((current: SortState) => SortState)) => void) => (key: SortKey) => {
+    setter((current) => ({ key, dir: current.key === key && current.dir === 'desc' ? 'asc' : 'desc' }));
+    setPage(1);
+  };
   const trendValues = (overview?.trend || []).map((item: Payload) => Number(item.revenue || 0));
   const sourceLabel = health?.mode === 'demo' ? 'CSV demo' : 'Exasol';
   const sourceStatus = loading
@@ -316,10 +413,10 @@ export default function Home() {
     <main className="main-column">
       <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><span>/</span><b>{navItems.find((item) => item.id === section)?.label}</b></div>
         <div className="topbar-actions">
-          <label className="select-group"><small>Period</small><select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={0}>All time</option><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option><option value={365}>Last 12 months</option></select></label>
-          <label className="select-group"><small>Channel</small><select value={channel} onChange={(event) => setChannel(event.target.value)}><option value="">All channels</option>{channels.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+          {section !== 'campaigns' && <><label className="select-group"><small>Period</small><select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={0}>All time</option><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option><option value={365}>Last 12 months</option></select></label>
+          <label className="select-group"><small>Channel</small><select value={channel} onChange={(event) => setChannel(event.target.value)}><option value="">All channels</option>{channels.map((name) => <option key={name} value={name}>{name}</option>)}</select></label></>}
           <button className="icon-button" title={light ? 'Switch to dark theme' : 'Switch to light theme'} onClick={() => setLight(!light)}>{light ? <Moon size={16} /> : <Sun size={16} />}</button>
-          {section === 'data' ? <button className="icon-button data-refresh" onClick={() => void refresh()} disabled={loading} title="Refresh Data" aria-label="Refresh Data"><RefreshCw size={14} className={loading ? 'spin' : ''} /></button> : <div className="data-status" aria-label="Data source status">
+          {section === 'campaigns' ? null : section === 'data' ? <button className="icon-button data-refresh" onClick={() => void refresh()} disabled={loading} title="Refresh Data" aria-label="Refresh Data"><RefreshCw size={14} className={loading ? 'spin' : ''} /></button> : <div className="data-status" aria-label="Data source status">
             <span className="data-status-source">
               <span className={`health-dot ${loading ? 'checking' : health?.status === 'ok' ? '' : 'offline'}`} />
               Data source: <strong>{sourceLabel}</strong>
@@ -366,10 +463,45 @@ export default function Home() {
           <div className="notice neutral"><CircleHelp size={15} /><span>No inferred causes, automated budget allocations, or live ad-account changes are generated. This dashboard reports the supplied metrics and summarizes them with AI on request.</span></div>
         </>}
 
-        {section === 'campaigns' && <><div className="page-heading"><div><div className="eyebrow">CAMPAIGN INTELLIGENCE</div><h1>Performance explorer</h1><p>Search and compare campaign/SKU records from the selected date range.</p></div><button className="secondary-button" onClick={() => void exportCampaigns()}><ArrowDownToLine size={15} /> Export current page</button></div>
-          <section className="panel campaign-panel"><div className="toolbar"><label className="search-box"><Search size={15} /><input id="campaign-search" value={search} onChange={(event) => { setPage(1); setSearch(event.target.value); }} placeholder="Search campaigns, SKUs, channels…" /></label><span className="result-count">{number(campaigns?.total)} campaign/SKU groups</span></div>
-            {campaigns ? <div className="table-scroll"><table><thead><tr><th>CAMPAIGN / SKU</th><th>CHANNEL</th><th>SPEND</th><th>IMPRESSIONS</th><th>CLICKS*</th><th>CONVERSIONS</th><th>ATTRIBUTED REVENUE</th><th>ROAS</th></tr></thead><tbody>{campaigns.items.map((row: Payload) => <tr key={`${row.campaign_id}-${row.sku_id}`}><td><b>{row.campaign_id}</b><small>{row.sku_id} · {row.ad_platform}</small></td><td>{row.channel}</td><td>{money(row.spend)}</td><td>{number(row.impressions)}</td><td>{number(row.clicks)}</td><td>{number(row.conversions)}</td><td>{money(row.attributed_revenue)}</td><td><span className="roas">{ratio(row.roas)}</span></td></tr>)}</tbody></table></div> : <div className="state-card"><LoaderCircle className="spin" />Loading campaigns…</div>}
-            <div className="pagination"><span>* Clicks use the dataset's estimated_clicks field. Revenue is not independently reconciled.</span><div><button disabled={page <= 1} onClick={() => setPage(page - 1)}><ArrowLeft size={14} /> Previous</button><span>Page {campaigns?.page || page}</span><button disabled={!campaigns || page * campaigns.page_size >= campaigns.total} onClick={() => setPage(page + 1)}>Next <ArrowRight size={14} /></button></div></div>
+        {section === 'campaigns' && <>
+          <div className="page-heading"><div><h1>Performance Explorer</h1><p>Analyze campaign performance across time, channels and campaigns.</p></div><div className="explorer-meta"><span>Last updated: {lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</span><button className="secondary-button" onClick={() => void exportCampaigns()} disabled={!visibleCampaigns.length}><ArrowDownToLine size={15} /> Export CSV</button></div></div>
+          <div className="explorer-filters">
+            <label><span>Period</span><select value={days} onChange={(event) => { setDays(Number(event.target.value)); setPage(1); }}>{Object.entries(periodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label><span>Channel</span><select value={channel} onChange={(event) => { setChannel(event.target.value); setPage(1); }}><option value="">All channels</option>{channels.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+            <label><span>Campaign</span><select value={campaign} onChange={(event) => { setCampaign(event.target.value); setPage(1); }}><option value="">All campaigns</option>{campaignOptions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+            {filtersActive && <div className="filter-chips">
+              {days !== 0 && <button type="button" onClick={() => setDays(0)}>{periodLabels[days]} <X size={11} /></button>}
+              {channel && <button type="button" onClick={() => setChannel('')}>{channel} <X size={11} /></button>}
+              {campaign && <button type="button" onClick={() => setCampaign('')}>{campaign} <X size={11} /></button>}
+              <button type="button" className="reset-filters" onClick={resetFilters}>Reset filters</button>
+            </div>}
+          </div>
+          {metrics && <div className="explorer-kpis">
+            <div><span>Spend</span><strong>{fullNumber(metrics.spend)}</strong></div>
+            <div><span>Revenue <Info text={metricHelp.revenue} label="About revenue" /></span><strong>{fullNumber(metrics.attributed_revenue)}</strong></div>
+            <div><span>Adjusted Profit <Info text={metricHelp.profit} label="About adjusted profit" /></span><strong>{fullNumber(metrics.return_adjusted_net_profit)}</strong></div>
+            <div><span>ROAS <Info text={metricHelp.roas} label="About ROAS" /></span><strong>{roasText(metrics.roas)}</strong></div>
+          </div>}
+          <section className="panel explorer-panel explorer-trend"><div className="panel-head"><div><h2>Performance Over Time</h2></div>
+            <div className="metric-tabs" role="tablist" aria-label="Metric">{trendMetrics.map((item) => <button key={item.id} type="button" role="tab" aria-selected={trendMetric === item.id} className={trendMetric === item.id ? 'active' : ''} onClick={() => setTrendMetric(item.id)}>{item.label}</button>)}</div></div>
+            {trendSeries.length ? <div className="chart-wrap explorer-chart"><AreaLine values={trendSeries} color={activeTrend.color} /><div className="chart-foot"><span>{dateOnly(trendRows[0]?.date)}</span><span>Peak {formatTrend(Math.max(...trendSeries))}</span><span>{dateOnly(trendRows[trendRows.length - 1]?.date)}</span></div></div> : <Empty text={error || 'No trend records for this filter.'} />}
+          </section>
+          <section className="panel explorer-panel"><div className="panel-head"><div><h2>Channel Comparison</h2></div></div>
+            <div className="table-scroll"><table className="explorer-table"><thead><tr><SortHead label="Channel" field="name" sort={channelSort} onSort={toggleSort(setChannelSort)} /><SortHead label="Spend" field="spend" sort={channelSort} onSort={toggleSort(setChannelSort)} /><SortHead label="Revenue" field="revenue" sort={channelSort} onSort={toggleSort(setChannelSort)} info={metricHelp.revenue} /><SortHead label="Adjusted Profit" field="profit" sort={channelSort} onSort={toggleSort(setChannelSort)} info={metricHelp.profit} /><SortHead label="ROAS" field="roas" sort={channelSort} onSort={toggleSort(setChannelSort)} info={metricHelp.roas} /></tr></thead>
+              <tbody>{sortedChannels.length ? sortedChannels.map((item: Payload) => {
+                const bar = (field: SortKey, text: string) => {
+                  const raw = Number(sortValue[field](item)) || 0;
+                  const width = channelSort.key === field && channelMax ? Math.max(2, (Math.abs(raw) / channelMax) * 100) : 0;
+                  return <td className="num"><span>{text}</span>{width > 0 && <i className="bar" style={{ width: `${width}%` }} />}</td>;
+                };
+                return <tr key={item.channel}><td><b>{item.channel}</b></td>{bar('spend', fullNumber(item.spend))}{bar('revenue', fullNumber(item.attributed_revenue))}{bar('profit', fullNumber(item.return_adjusted_net_profit))}{bar('roas', roasText(item.roas))}</tr>;
+              }) : <tr><td colSpan={5} className="table-empty">No channels for this filter.</td></tr>}</tbody></table></div>
+          </section>
+          <section className="panel explorer-panel campaign-panel"><div className="panel-head"><div><h2>Campaign Performance</h2></div><span className="result-count">{fullNumber(visibleCampaigns.length)} campaigns</span></div>
+            {(campaigns?.items?.length || 0) > campaignPageSize && <div className="toolbar"><label className="search-box"><Search size={15} /><input id="campaign-search" value={search} onChange={(event) => { setPage(1); setSearch(event.target.value); }} placeholder="Search campaigns" /></label></div>}
+            {campaigns ? <div className="table-scroll"><table className="explorer-table"><thead><tr><SortHead label="Campaign" field="name" sort={campaignSort} onSort={toggleSort(setCampaignSort)} /><th>Channel</th><SortHead label="Spend" field="spend" sort={campaignSort} onSort={toggleSort(setCampaignSort)} /><SortHead label="Revenue" field="revenue" sort={campaignSort} onSort={toggleSort(setCampaignSort)} info={metricHelp.revenue} /><SortHead label="Adjusted Profit" field="profit" sort={campaignSort} onSort={toggleSort(setCampaignSort)} info={metricHelp.profit} /><SortHead label="ROAS" field="roas" sort={campaignSort} onSort={toggleSort(setCampaignSort)} info={metricHelp.roas} /></tr></thead>
+              <tbody>{pagedCampaigns.length ? pagedCampaigns.map((row: Payload) => <tr key={`${row.campaign_id}-${row.sku_id}-${row.ad_platform}`}><td><b>{row.campaign_id}</b><small>{row.sku_id}</small></td><td>{row.channel}</td><td className="num">{fullNumber(row.spend)}</td><td className="num">{fullNumber(row.attributed_revenue)}</td><td className="num">{fullNumber(row.return_adjusted_net_profit)}</td><td className="num">{roasText(row.roas)}</td></tr>) : <tr><td colSpan={6} className="table-empty">No campaigns for this filter.</td></tr>}</tbody></table></div> : <div className="state-card"><LoaderCircle className="spin" />Loading campaigns…</div>}
+            <div className="pagination"><span>Metrics are based on supplied campaign data.</span><div><button disabled={campaignPage <= 1} onClick={() => setPage(campaignPage - 1)}><ArrowLeft size={14} /> Previous</button><span>Page {campaignPage} of {campaignPages}</span><button disabled={campaignPage >= campaignPages} onClick={() => setPage(campaignPage + 1)}>Next <ArrowRight size={14} /></button></div></div>
           </section></>}
 
         {section === 'insights' && <><div className="page-heading"><div><div className="eyebrow">VERIFIED OBSERVATIONS</div><h1>Anomaly & diagnosis</h1><p>Observed metrics only. Changes do not establish their cause.</p></div></div>
