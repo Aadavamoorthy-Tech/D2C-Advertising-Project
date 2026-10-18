@@ -27,14 +27,9 @@ const navItems: { id: Section; label: string; group: string; icon: typeof Gauge 
   { id: 'opportunities', label: 'Opportunity radar', group: 'INTELLIGENCE', icon: Target },
   { id: 'decisions', label: 'Decision center', group: 'DECISIONING', icon: Target },
   { id: 'optimizer', label: 'Budget optimizer', group: 'DECISIONING', icon: TrendingUp },
-  { id: 'inventory', label: 'Inventory & margin', group: 'DECISIONING', icon: Layers3 },
-  { id: 'creatives', label: 'Creative intelligence', group: 'DECISIONING', icon: Sparkles },
   { id: 'execution', label: 'Execution & audit', group: 'GOVERNANCE', icon: Check },
-  { id: 'learning', label: 'Learning loop', group: 'GOVERNANCE', icon: Activity },
   { id: 'summary', label: 'AI data summary', group: 'GOVERNANCE', icon: Sparkles },
-  { id: 'copilot', label: 'AI copilot', group: 'GOVERNANCE', icon: Command },
   { id: 'settings', label: 'Settings', group: 'SYSTEM', icon: Settings2 },
-  { id: 'scenarios', label: 'Scenario guide', group: 'SYSTEM', icon: FileSpreadsheet },
 ];
 
 type Priority = 'High' | 'Medium' | 'Low';
