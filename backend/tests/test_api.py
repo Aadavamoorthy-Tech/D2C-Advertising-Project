@@ -373,3 +373,143 @@ def test_budget_scenarios_save_and_send_to_decision_center(monkeypatch, tmp_path
     assert len(items) == 1 and items[0]["status"] == "proposed"
     assert items[0]["title"].startswith("Budget reallocation simulation")
     assert client.get("/api/budget-scenarios").json()["items"][0]["sent"] is True
+
+
+@pytest.fixture
+def helper_api(monkeypatch):
+    import time
+
+    monkeypatch.setattr(app_module, "DEMO_MODE", False)
+    monkeypatch.setenv("HELPER_TOKEN", "test-helper-token")
+    monkeypatch.setattr(app_module, "_exasol_is_reachable", lambda: False)
+    with app_module._db_start_lock:
+        app_module._db_start_job.clear()
+        app_module._db_start_job.update({
+            "job_id": None,
+            "state": "idle",
+            "step": "idle",
+            "message": "Database startup has not been requested.",
+            "updated_at": None,
+        })
+        app_module._db_start_last_heartbeat = time.monotonic()
+        app_module._db_start_last_request = float("-inf")
+        app_module._db_start_claimed_job = None
+        app_module._db_start_claimed_at = 0.0
+    yield
+    with app_module._db_start_lock:
+        app_module._db_start_job.clear()
+        app_module._db_start_job.update({
+            "job_id": None,
+            "state": "idle",
+            "step": "idle",
+            "message": "Database startup has not been requested.",
+            "updated_at": None,
+        })
+        app_module._db_start_last_heartbeat = 0.0
+        app_module._db_start_last_request = float("-inf")
+        app_module._db_start_claimed_job = None
+        app_module._db_start_claimed_at = 0.0
+
+
+def test_database_start_browser_endpoints_are_one_click_without_an_admin_token(helper_api):
+    response = client.post("/api/db/start")
+    assert response.status_code == 202
+    assert response.json()["state"] == "running"
+    assert client.get("/api/db/start/status").status_code == 200
+
+
+def test_database_start_reports_already_running_without_a_helper(helper_api, monkeypatch):
+    monkeypatch.setattr(app_module, "_exasol_is_reachable", lambda: True)
+    status = client.get("/api/db/start/status")
+    assert status.status_code == 200
+    assert status.json()["state"] == "already_running"
+    assert status.json()["message"] == "Database is already running."
+    assert status.json()["helper_online"] is True
+    response = client.post("/api/db/start")
+    assert response.status_code == 200
+    assert response.json()["state"] == "already_running"
+    assert response.json()["step"] == "done"
+    assert response.json()["message"] == "Database is already running."
+    assert response.json()["helper_online"] is True
+
+
+def test_helper_poll_report_contract_and_database_start_state_machine(helper_api):
+    helper = {"Authorization": "Bearer test-helper-token"}
+    assert client.get("/api/helper/poll").status_code == 401
+    assert client.get("/api/helper/poll", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.post("/api/helper/report", headers={"Authorization": "Bearer wrong"}, json={
+        "job_id": "job-1", "step": "requested", "message": "Starting",
+    }).status_code == 401
+
+    started = client.post("/api/db/start")
+    assert started.status_code == 202
+    job_id = started.json()["job_id"]
+    assert started.json()["step"] == "requested"
+    assert client.post("/api/db/start").json()["job_id"] == job_id
+    invalid = client.post("/api/helper/report", headers=helper, json={
+        "job_id": job_id, "step": "verifying", "message": "Out of order",
+    })
+    assert invalid.status_code == 409
+    assert client.get("/api/helper/poll", headers=helper).json() == {
+        "action": "start", "job_id": job_id,
+    }
+    assert client.get("/api/helper/poll", headers=helper).json() == {"action": "none"}
+
+    steps = (
+        "requested", "starting_exasol", "starting_tunnel", "updating_render",
+        "deploying", "verifying", "done",
+    )
+    for step in steps:
+        response = client.post("/api/helper/report", headers=helper, json={
+            "job_id": job_id, "step": step, "message": f"Progress: {step}",
+        })
+        assert response.status_code == 200, response.text
+    status = client.get("/api/db/start/status")
+    assert status.status_code == 200
+    assert status.json()["state"] == "succeeded"
+    assert status.json()["step"] == "done"
+    assert status.json()["helper_online"] is True
+
+
+def test_start_rate_limit_and_helper_offline_detection(helper_api):
+    helper = {"Authorization": "Bearer test-helper-token"}
+    import time
+
+    app_module._db_start_last_heartbeat = 0.0
+    status = client.get("/api/db/start/status")
+    assert status.json()["helper_online"] is False
+    assert client.post("/api/db/start").status_code == 503
+    assert "helper is offline" in client.post("/api/db/start").json()["detail"].lower()
+
+    app_module._db_start_last_request = time.monotonic() - 61
+    app_module._db_start_last_heartbeat = time.monotonic()
+    started = client.post("/api/db/start")
+    assert started.status_code == 202
+    assert client.post("/api/db/start").status_code == 202
+    failed = client.post("/api/helper/report", headers=helper, json={
+        "job_id": started.json()["job_id"],
+        "step": "failed",
+        "message": "Test failure",
+    })
+    assert failed.status_code == 200
+    assert client.post("/api/db/start").status_code == 429
+    assert client.get("/api/helper/poll", headers=helper).json() == {"action": "none"}
+    assert client.get("/api/db/start/status").json()["helper_online"] is True
+    app_module._db_start_last_heartbeat = time.monotonic() - 46
+    assert client.get("/api/db/start/status").json()["helper_online"] is False
+
+
+def test_helper_report_reconstructs_progress_after_backend_state_reset(helper_api):
+    helper = {"Authorization": "Bearer test-helper-token"}
+    app_module._db_start_job.update(job_id=None, state="idle", step="idle")
+    restored = client.post("/api/helper/report", headers=helper, json={
+        "job_id": "persisted-job", "step": "deploying", "message": "Render deployment in progress.",
+    })
+    assert restored.status_code == 200
+    assert client.get("/api/db/start/status").json()["step"] == "deploying"
+
+
+def test_db_start_endpoints_are_not_applicable_in_demo_mode(helper_api, monkeypatch):
+    monkeypatch.setattr(app_module, "DEMO_MODE", True)
+    assert client.post("/api/db/start").status_code == 404
+    assert client.get("/api/db/start/status").status_code == 404

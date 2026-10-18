@@ -1,6 +1,6 @@
 'use client';
 
-import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDownToLine, ArrowLeft, ArrowRight, BarChart3, Bell, Check,
   ChevronDown, CircleHelp, CloudUpload, Command, Database, FileSpreadsheet,
@@ -81,6 +81,153 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
   return data as T;
+}
+
+type DbStartStatus = {
+  helper_online: boolean;
+  state: 'idle' | 'checking' | 'running' | 'succeeded' | 'already_running' | 'failed';
+  step: string;
+  message: string;
+  updated_at: string | null;
+};
+
+const dbStartSteps = [
+  ['requested', 'Request received'],
+  ['starting_exasol', 'Starting Exasol'],
+  ['starting_tunnel', 'Starting or reusing ngrok'],
+  ['updating_render', 'Updating Render EXASOL_DSN'],
+  ['deploying', 'Deploying on Render (only if the address changed)'],
+  ['verifying', 'Verifying a live database query'],
+  ['done', 'Complete'],
+] as const;
+
+function DatabaseStartControl({ onComplete }: { onComplete: () => Promise<void> }) {
+  const [status, setStatus] = useState<DbStartStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [waitingForBackend, setWaitingForBackend] = useState(false);
+  const [error, setError] = useState('');
+  const refreshed = useRef(false);
+
+  const readStatus = useCallback(async () => {
+    const result = await request<DbStartStatus>('/api/db/start/status');
+    setStatus(result);
+    setWaitingForBackend(false);
+    return result;
+  }, []);
+
+  useEffect(() => {
+    setChecking(true);
+    void readStatus().catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : 'Could not check the database helper.');
+    }).finally(() => setChecking(false));
+  }, [readStatus]);
+
+  useEffect(() => {
+    if (!['checking', 'running'].includes(status?.state || '')) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        await readStatus();
+      } catch {
+        if (!cancelled) setWaitingForBackend(true);
+      }
+      if (!cancelled) timer = setTimeout(() => { void poll(); }, 4000);
+    };
+    timer = setTimeout(() => { void poll(); }, 4000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [readStatus, status?.state]);
+
+  useEffect(() => {
+    if (status?.state === 'running' || status?.state === 'checking') refreshed.current = false;
+    if ((status?.state === 'succeeded' || status?.state === 'already_running') && !refreshed.current) {
+      refreshed.current = true;
+      void onComplete();
+    }
+  }, [onComplete, status?.state, status?.step]);
+
+  async function startDatabase() {
+    setBusy(true);
+    setError('');
+    try {
+      const started = await request<DbStartStatus>('/api/db/start', {
+        method: 'POST',
+      });
+      setStatus(started);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not request database startup.';
+      setError(message);
+      try {
+        await readStatus();
+      } catch {
+        setWaitingForBackend(true);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function checkHelper() {
+    setChecking(true);
+    setError('');
+    try {
+      await readStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not check the database helper.');
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  const currentStep = dbStartSteps.findIndex(([step]) => step === status?.step);
+  const helperOffline = Boolean(
+    status && !status.helper_online && !['checking', 'running', 'already_running'].includes(status.state),
+  );
+  const buttonDisabled = busy || checking || ['checking', 'running'].includes(status?.state || '') || helperOffline;
+
+  return <section className="panel db-start-panel" aria-labelledby="db-start-heading">
+    <div className="db-start-copy">
+      <div className="db-start-eyebrow"><Database size={14} /> LOCAL DATABASE</div>
+      <h2 id="db-start-heading">Start database</h2>
+      <p>Start Exasol on the configured laptop, bring up its ngrok tunnel, sync Render, and verify the live dataset.</p>
+      {helperOffline && <p className="db-start-hint">The laptop must be on, awake, online, and running the D2C Exasol helper.</p>}
+      {status?.state === 'running' && <ol className="db-start-steps" aria-label="Database startup progress">
+        {dbStartSteps.map(([step, label], index) => {
+          const reached = currentStep >= index;
+          const active = status.step === step;
+          return <li className={`${reached ? 'reached' : ''} ${active ? 'active' : ''}`} key={step}>
+            <span className="db-start-step-icon">{reached && !active ? <Check size={12} /> : active ? <LoaderCircle size={12} className="spin" /> : null}</span>
+            {label}
+          </li>;
+        })}
+      </ol>}
+      {status?.state === 'running' && <p className="db-start-message" role="status">
+        {waitingForBackend ? 'Backend redeploying, waiting for it to return…' : status.message}
+      </p>}
+      {(status?.state === 'succeeded' || status?.state === 'already_running') && <p className="db-start-success" role="status">{status.message}</p>}
+      {status?.state === 'failed' && <p className="db-start-failure" role="alert">{status.message}</p>}
+      {error && <p className="db-start-failure" role="alert">{error}</p>}
+    </div>
+    <div className="db-start-actions">
+      <button type="button" className="db-start-button" onClick={() => void startDatabase()} disabled={buttonDisabled}>
+        {busy || status?.state === 'running' || status?.state === 'checking'
+          ? <LoaderCircle size={15} className="spin" />
+          : <Database size={15} />}
+        {status?.state === 'running' || status?.state === 'checking'
+          ? 'Starting…'
+          : status?.state === 'already_running'
+            ? 'Database already running'
+            : status?.state === 'failed'
+              ? 'Retry start'
+              : 'Start database'}
+      </button>
+      {helperOffline && <button type="button" className="db-start-secondary" onClick={() => void checkHelper()} disabled={checking}>Check helper again</button>}
+    </div>
+  </section>;
 }
 
 function fullNumber(value: number | null | undefined, digits = 0) {
@@ -663,6 +810,7 @@ export default function Home() {
               <button type="button" className="ac-more" onClick={() => goTo('data')}>View Data Details <ArrowRight size={12} /></button>
             </section>
           </div>
+          <DatabaseStartControl onComplete={refresh} />
           <p className="ac-note">Insights are based on available campaign data. No live advertising changes are made automatically.</p>
         </>}
 
