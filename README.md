@@ -45,8 +45,11 @@ The frontend uses `NEXT_PUBLIC_API_URL` (default `http://localhost:8000`). The G
 
 ## Data and AI behavior
 
-- Upload a CSV from **Unified data hub**. The API validates the exact 37-column schema, dates, numeric values, and duplicate IDs. The current dataset table is replaced on a new valid upload; an identical file is detected by SHA-256 and not reloaded.
-- Live mode writes only to the dedicated `ADPILOT_LLM.D2C_CAMPAIGN_DATA` table and an ingestion metadata table under `ADPILOT_LLM`.
+- In live mode the dataset is **read-only** from `DQPS.RAW_D2C_DATA` in Exasol (`RECORD_DATE` is exposed as `date`). `POST /api/datasets/ingest` returns `405` in live mode and never writes to Exasol; CSV upload and the bundled CSV remain available only in explicit demo mode (`ADPILOT_DEMO_MODE=1`). The frontend still shows its upload form; live uploads are rejected with that message.
+- The backend caches the whole 15,000-row DataFrame in memory for `ADPILOT_DATA_CACHE_TTL_SECONDS` (default 300) and refreshes it with one `ORDER BY "ID"` query on a fresh, closed-after-use connection. If a refresh fails, the cached copy is served for up to `ADPILOT_DATA_MAX_STALE_SECONDS` (default 900); after that, or with no cache, API routes return a sanitized `503`. The CSV is never used as a fallback.
+- Automatic ngrok/Render DSN sync for Windows: see `tools/ngrok_render_sync/README.md`.
+- The PowerShell launcher checks `exakit status --json`, starts Exasol only if the installed runtime is stopped, then waits for the configured database port before continuing. It does not install or repair Exasol.
+- To run that workflow automatically at Windows logon, first configure `tools/ngrok_render_sync/local.env`, then run `.\tools\ngrok_render_sync\Start-ExasolTunnel.ps1 -InstallTask`. Remove it with `-UninstallTask`. This is a logon workflow, not a hook on each browser visit; the hosted Vercel app cannot safely start processes on your laptop.
 - Enable demo mode only with `ADPILOT_DEMO_MODE=1`. UI badges identify fixture data.
 - The overview and campaign table metrics are calculated deterministically in the backend. CTR, CPC, CPM, CVR, CPA, and ROAS use aggregate sums. Zero denominators return unavailable values.
 - Campaign revenue is labeled as attributed data and is not represented as reconciled business revenue. The CSV has no currency column; totals assume one currency.

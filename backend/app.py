@@ -4,9 +4,11 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import os
 import sqlite3
-import tempfile
+import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -41,8 +43,12 @@ DEFAULT_CSV = ROOT / "engineered_d2c_dataset_15k_v5.csv"
 DEMO_MODE = os.getenv("ADPILOT_DEMO_MODE", "").strip().lower() in {"1", "true", "yes"}
 MAX_UPLOAD_BYTES = int(os.getenv("ADPILOT_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
 DEFAULT_BATCH_SIZE = 500
-TABLE_NAME = '"ADPILOT_LLM"."D2C_CAMPAIGN_DATA"'
-INGESTIONS_TABLE = '"ADPILOT_LLM"."INGESTIONS"'
+SOURCE_TABLE = '"DQPS"."RAW_D2C_DATA"'
+CACHE_TTL_SECONDS = float(os.getenv("ADPILOT_DATA_CACHE_TTL_SECONDS", "300"))
+CACHE_MAX_STALE_SECONDS = float(os.getenv("ADPILOT_DATA_MAX_STALE_SECONDS", "900"))
+logger = logging.getLogger("adpilot")
+_cache_lock = threading.Lock()
+_cache: dict[str, Any] = {"frame": None, "loaded_at": 0.0}
 FINGERPRINT = os.getenv(
     "EXASOL_FINGERPRINT",
     "CAE0B01EE61155D5325D4D4D4AF1578EB13DCFA9AE613DB6C18B3BB6887F8085",
@@ -67,6 +73,8 @@ NUMERIC_COLUMNS = (
     "stock_level", "customer_age", "return_rate_pct", "units_returned",
     "return_adjusted_net_profit", "roas",
 )
+# DQPS.RAW_D2C_DATA names every column like the CSV header except date -> RECORD_DATE.
+SOURCE_COLUMNS = {name: ("RECORD_DATE" if name == "date" else name.upper()) for name in CSV_COLUMNS}
 AI_COLUMNS = (
     "date", "region", "channel", "product_category", "customer_segment",
     "ad_spend", "price", "discount_rate", "market_reach", "impressions",
@@ -76,28 +84,6 @@ AI_COLUMNS = (
     "profit_margin_pct", "stock_level", "return_rate_pct", "units_returned",
     "return_adjusted_net_profit", "roas",
 )
-TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS "ADPILOT_LLM"."D2C_CAMPAIGN_DATA" (
-    "ID" DECIMAL(18, 0), "DATE" TIMESTAMP, "REGION" VARCHAR(256),
-    "CHANNEL" VARCHAR(256), "PRODUCT_CATEGORY" VARCHAR(256),
-    "CUSTOMER_SEGMENT" VARCHAR(256), "AD_SPEND" DECIMAL(18, 6),
-    "PRICE" DECIMAL(18, 6), "DISCOUNT_RATE" DECIMAL(18, 6),
-    "MARKET_REACH" DECIMAL(18, 6), "IMPRESSIONS" DECIMAL(18, 6),
-    "CLICK_THROUGH_RATE" DECIMAL(18, 6), "COMPETITION_INDEX" DECIMAL(18, 6),
-    "SEASONALITY_INDEX" DECIMAL(18, 6), "CAMPAIGN_DURATION_DAYS" DECIMAL(18, 0),
-    "CUSTOMER_LIFETIME_VALUE" DECIMAL(18, 6), "ESTIMATED_CLICKS" DECIMAL(18, 6),
-    "EFFECTIVE_PRICE" DECIMAL(18, 6), "SKU_ID" VARCHAR(256),
-    "AD_PLATFORM" VARCHAR(256), "CAMPAIGN_ID" VARCHAR(256),
-    "UNIT_COGS" DECIMAL(18, 6), "CONVERSIONS" DECIMAL(18, 6),
-    "UNITS_SOLD" DECIMAL(18, 6), "SALES_REVENUE" DECIMAL(18, 6),
-    "TOTAL_COGS" DECIMAL(18, 6), "GROSS_PROFIT" DECIMAL(18, 6),
-    "NET_PROFIT" DECIMAL(18, 6), "PROFIT_MARGIN_PCT" DECIMAL(18, 6),
-    "STOCK_LEVEL" DECIMAL(18, 6), "CUSTOMER_AGE" DECIMAL(18, 0),
-    "CUSTOMER_GENDER" VARCHAR(256), "PAYMENT_METHOD" VARCHAR(256),
-    "RETURN_RATE_PCT" DECIMAL(18, 6), "UNITS_RETURNED" DECIMAL(18, 6),
-    "RETURN_ADJUSTED_NET_PROFIT" DECIMAL(18, 6), "ROAS" DECIMAL(18, 6)
-)
-"""
 
 app = FastAPI(title="AdPilot D2C Intelligence", version="1.0.0")
 app.add_middleware(
@@ -153,7 +139,8 @@ def exasol_connection() -> Iterator[Any]:
         dsn=dsn,
         user=os.getenv("EXASOL_USER", "sys"),
         password=exasol_password(),
-        compression=True,
+        encryption=True,
+        connection_timeout=15,
     )
     try:
         yield conn
@@ -249,26 +236,58 @@ def load_frame() -> tuple[pd.DataFrame, str]:
             raise HTTPException(status_code=503, detail=f"Could not load demo CSV: {exc}") from exc
         return frame, "demo_csv"
 
+    now = time.monotonic()
+    with _cache_lock:
+        cached = _cache["frame"]
+        age = now - _cache["loaded_at"]
+        if cached is not None and age < CACHE_TTL_SECONDS:
+            return cached.copy(), "exasol"
+        try:
+            fresh = fetch_exasol_frame()
+        except HTTPException as exc:
+            if cached is not None and age < CACHE_MAX_STALE_SECONDS and exc.status_code == 503:
+                logger.warning("Exasol refresh failed; serving cached data aged %.0fs", age)
+                return cached.copy(), "exasol"
+            raise
+        _cache["frame"] = fresh
+        _cache["loaded_at"] = time.monotonic()
+        return fresh.copy(), "exasol"
+
+
+def fetch_exasol_frame() -> pd.DataFrame:
+    """Read the full dataset from Exasol; never falls back to the CSV."""
+    select_list = ", ".join(f'"{SOURCE_COLUMNS[name]}"' for name in CSV_COLUMNS)
     try:
         with exasol_connection() as conn:
-            query_columns = ", ".join(f'"{name.upper()}"' for name in CSV_COLUMNS)
             rows = conn.execute(
-                f"SELECT {query_columns} FROM {TABLE_NAME} ORDER BY \"ID\""
+                f'SELECT {select_list} FROM {SOURCE_TABLE} ORDER BY "ID"'
             ).fetchall()
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Exasol is unavailable: {exc}") from exc
-    if not rows:
+        logger.error("Exasol dataset query failed (%s)", type(exc).__name__)
         raise HTTPException(
-            status_code=404,
-            detail="No ingested dataset was found. Upload a CSV from the Data ingestion screen.",
-        )
-    frame = pd.DataFrame(rows, columns=CSV_COLUMNS)
+            status_code=503,
+            detail="Exasol data source is unavailable. Check backend configuration.",
+        ) from exc
+    if not rows:
+        raise HTTPException(status_code=404, detail="The Exasol dataset table contains no rows.")
+    frame = pd.DataFrame(rows, columns=list(CSV_COLUMNS))
+    # Exasol DECIMAL values arrive as decimal.Decimal; normalise to the dtypes the CSV path produced.
+    for column in NUMERIC_COLUMNS:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame["id"] = frame["id"].astype("int64")
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     if frame["id"].duplicated().any():
         raise HTTPException(
             status_code=409,
-            detail="The active Exasol table contains duplicate IDs. Re-ingest a validated CSV before analysis.",
+            detail="The Exasol dataset table contains duplicate IDs; analysis was stopped.",
         )
-    return frame, "exasol"
+    return frame
+
+
+def clear_frame_cache() -> None:
+    with _cache_lock:
+        _cache["frame"] = None
+        _cache["loaded_at"] = 0.0
 
 
 def filtered_frame(
@@ -471,7 +490,7 @@ def dataset_status() -> dict[str, Any]:
         return status
     try:
         with exasol_connection() as conn:
-            count = conn.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}").fetchone()[0]
+            count = conn.execute(f"SELECT COUNT(*) FROM {SOURCE_TABLE}").fetchone()[0]
         return {
             "status": "ready" if count else "not_loaded",
             "row_count": int(count),
@@ -491,6 +510,11 @@ def dataset_status() -> dict[str, Any]:
 @app.post("/api/datasets/ingest")
 async def ingest_csv(file: UploadFile = File(...)) -> dict[str, Any]:
     global demo_frame, demo_status
+    if not DEMO_MODE:
+        raise HTTPException(
+            status_code=405,
+            detail="Uploads are disabled in live mode; the dataset is read-only from Exasol.",
+        )
     if not file.filename or Path(file.filename).suffix.lower() != ".csv":
         raise HTTPException(status_code=415, detail="Upload a .csv file.")
     content = await file.read(MAX_UPLOAD_BYTES + 1)
@@ -503,99 +527,25 @@ async def ingest_csv(file: UploadFile = File(...)) -> dict[str, Any]:
     digest = hashlib.sha256(content).hexdigest()
     dataset_id = str(uuid.uuid4())
     ingested_at = datetime.now(timezone.utc).isoformat()
-    if DEMO_MODE:
-        demo_frame = frame
-        demo_status = {
-            "dataset_id": dataset_id,
-            "file_name": report["file_name"],
-            "row_count": report["row_count"],
-            "ingested_at": ingested_at,
-            "status": "ready",
-            "duplicate_rows": report["duplicate_ids"],
-            "warnings": report["warnings"],
-            "source": "Explicit CSV fixture demo mode",
-            "sha256": digest,
-        }
-    else:
-        try:
-            with exasol_connection() as conn:
-                conn.execute('CREATE SCHEMA IF NOT EXISTS "ADPILOT_LLM"')
-                conn.execute(TABLE_DDL)
-                conn.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {INGESTIONS_TABLE} (
-                        "DATASET_ID" VARCHAR(36),
-                        "FILE_NAME" VARCHAR(1024),
-                        "FILE_SHA256" VARCHAR(64),
-                        "ROW_COUNT" DECIMAL(18, 0),
-                        "INGESTED_AT" TIMESTAMP,
-                        "STATUS" VARCHAR(32),
-                        "QUALITY_JSON" VARCHAR(2000000)
-                    )
-                    """
-                )
-                previous = conn.execute(
-                    f"""
-                    SELECT "DATASET_ID", "ROW_COUNT", "INGESTED_AT", "QUALITY_JSON"
-                    FROM {INGESTIONS_TABLE}
-                    WHERE "FILE_SHA256" = {{sha256}}
-                    ORDER BY "INGESTED_AT" DESC
-                    LIMIT 1
-                    """,
-                    {"sha256": digest},
-                ).fetchone()
-                if previous:
-                    return {
-                        "dataset_id": previous[0],
-                        "status": "duplicate",
-                        "row_count": int(previous[1]),
-                        "ingested_at": str(previous[2]),
-                        "quality": json.loads(previous[3]),
-                        "message": "This exact CSV was already ingested; no duplicate load was performed.",
-                    }
-
-                with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temp:
-                    temp.write(content)
-                    temp_path = Path(temp.name)
-                try:
-                    conn.execute(f"TRUNCATE TABLE {TABLE_NAME}")
-                    conn.import_from_file(
-                        str(temp_path), TABLE_NAME, import_params={"skip": 1}
-                    )
-                    conn.commit()
-                finally:
-                    temp_path.unlink(missing_ok=True)
-                conn.execute(
-                    f"""
-                    INSERT INTO {INGESTIONS_TABLE}
-                    ("DATASET_ID", "FILE_NAME", "FILE_SHA256", "ROW_COUNT",
-                     "INGESTED_AT", "STATUS", "QUALITY_JSON")
-                    VALUES ({{dataset_id}}, {{file_name}}, {{file_sha256}},
-                            {{row_count}}, CURRENT_TIMESTAMP, 'ready', {{quality_json}})
-                    """,
-                    {
-                        "dataset_id": dataset_id,
-                        "file_name": report["file_name"],
-                        "file_sha256": digest,
-                        "row_count": report["row_count"],
-                        "quality_json": json.dumps(report),
-                    },
-                )
-                conn.commit()
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Exasol ingestion failed ({type(exc).__name__}); check backend configuration.",
-            ) from exc
+    demo_frame = frame
+    demo_status = {
+        "dataset_id": dataset_id,
+        "file_name": report["file_name"],
+        "row_count": report["row_count"],
+        "ingested_at": ingested_at,
+        "status": "ready",
+        "duplicate_rows": report["duplicate_ids"],
+        "warnings": report["warnings"],
+        "source": "Explicit CSV fixture demo mode",
+        "sha256": digest,
+    }
     return {
         "dataset_id": dataset_id,
         "status": "ready",
         "row_count": report["row_count"],
         "ingested_at": ingested_at,
         "quality": report,
-        "source": "CSV fixture demo mode" if DEMO_MODE else "Exasol",
+        "source": "CSV fixture demo mode",
     }
 
 

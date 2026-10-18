@@ -6,3 +6,7 @@
 backend/var/
 backend/.env
 frontend/.env.local
+tools/ngrok_render_sync/local.env
+tools/ngrok_render_sync/.state/
+**/*.log
+**/.pytest_cache/
