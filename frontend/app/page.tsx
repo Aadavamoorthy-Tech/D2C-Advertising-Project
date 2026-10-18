@@ -299,9 +299,8 @@ export default function Home() {
             <Stat icon={<TrendingUp size={16} />} label="Cost per conversion" value={money(metrics.cpa, 2)} note="Total spend / total conversions" />
           </div>}
           <div className="dashboard-grid">
-            <section className="panel pulse-panel"><div className="panel-head"><div><h2>Performance Trend</h2><p>Attributed revenue over the selected period</p></div></div>
+            <section className="panel pulse-panel"><div className="panel-head"><div><h2>Performance Trend</h2><p className="chart-metric">Attributed Revenue <button type="button" className="chart-info" title="Revenue values are taken from the supplied campaign dataset and may differ from reconciled business revenue." aria-label="About attributed revenue"><CircleHelp size={13} /></button></p></div></div>
               {trendValues.length ? <div className="chart-wrap"><AreaLine values={trendValues} /><div className="chart-foot"><span>{dateOnly(overview?.trend?.[0]?.date)}</span><span>{dateOnly(overview?.trend?.[overview.trend.length - 1]?.date)}</span></div></div> : <Empty text={error || 'No trend records for this filter.'} />}
-              <div className="chart-disclaimer">Revenue values are from the supplied dataset; they are not presented as reconciled business revenue.</div>
             </section>
             <section className="panel source-panel"><div className="panel-head"><div><h2>Data quality</h2><p>Source and selected rows</p></div><Database size={17} /></div>
               <QualityRow label="Source" value={overview?.source === 'exasol' ? 'Exasol' : 'CSV fixture'} />
