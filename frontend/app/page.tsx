@@ -349,8 +349,8 @@ export default function Home() {
               <QualityRow label="Last ingestion" value={dataset?.ingested_at ? new Date(dataset.ingested_at).toLocaleString() : dataset?.source || '—'} />
               <p className="panel-foot">This upload replaces the active dataset table. An identical file is recognized by its content hash and is not reloaded.</p>
             </section></div>
-            <section className="panel"><div className="panel-head"><div><h2>Data validation</h2><p>Record quality and known dataset limitations</p></div></div>
-              <QualityRow label="Records in current view" value={number(overview?.quality?.rows)} />
+            <section className="panel"><div className="panel-head"><div><h2>Data Quality</h2><p>Record quality and known dataset limitations</p></div></div>
+              <QualityRow label="Records in view" value={number(overview?.quality?.rows)} />
               <QualityRow label="Duplicate IDs" value={number(overview?.quality?.duplicate_ids)} warning={Number(overview?.quality?.duplicate_ids || 0) > 0} />
               <QualityRow label="Currency" value={overview?.quality?.currency_note || 'Not specified'} warning />
               {dataset && Array.isArray(dataset.warnings) && dataset.warnings.map((warning: string) => <div className="quality-row" key={warning}><CircleHelp size={14} /><span>{warning}</span></div>)}
