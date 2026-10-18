@@ -68,7 +68,12 @@ function dateOnly(value: string | undefined) {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API}${path}`, { ...init, cache: 'no-store' });
+  let response: Response;
+  try {
+    response = await fetch(`${API}${path}`, { ...init, cache: 'no-store' });
+  } catch {
+    throw new Error(`Cannot reach the backend at ${API}. Make sure it is running, then press Retry.`);
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = data.detail;
