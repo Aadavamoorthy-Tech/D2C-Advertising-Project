@@ -247,6 +247,13 @@ export default function Home() {
       : health?.status === 'ok'
         ? 'Connected'
         : 'Offline';
+  const dataHealthStatus = loading
+    ? 'Checking'
+    : health?.status !== 'ok'
+      ? 'Unavailable'
+      : dataset?.status === 'ready' || dataset?.status === 'fixture'
+        ? 'Healthy'
+        : 'No dataset';
 
   return <div className="shell">
     <aside className="sidebar">
@@ -302,12 +309,13 @@ export default function Home() {
             <section className="panel pulse-panel"><div className="panel-head"><div><h2>Performance Trend</h2><p className="chart-metric">Attributed Revenue <button type="button" className="chart-info" title="Revenue values are taken from the supplied campaign dataset and may differ from reconciled business revenue." aria-label="About attributed revenue"><CircleHelp size={13} /></button></p></div></div>
               {trendValues.length ? <div className="chart-wrap"><AreaLine values={trendValues} /><div className="chart-foot"><span>{dateOnly(overview?.trend?.[0]?.date)}</span><span>{dateOnly(overview?.trend?.[overview.trend.length - 1]?.date)}</span></div></div> : <Empty text={error || 'No trend records for this filter.'} />}
             </section>
-            <section className="panel source-panel"><div className="panel-head"><div><h2>Data quality</h2><p>Source and selected rows</p></div><Database size={17} /></div>
-              <QualityRow label="Source" value={overview?.source === 'exasol' ? 'Exasol' : 'CSV fixture'} />
-              <QualityRow label="Records in view" value={number(overview?.quality?.rows)} />
-              <QualityRow label="Duplicate IDs" value={number(overview?.quality?.duplicate_ids)} />
-              <QualityRow label="Currency" value="Not specified" warning />
-              <p className="panel-foot">{overview?.quality?.currency_note || 'Data freshness depends on the last successful ingestion.'}</p>
+            <section className="panel source-panel data-health-panel"><div className="panel-head"><div><h2>Data Health</h2></div><Database size={17} /></div>
+              <div className="data-health-content">
+                <strong className={`data-health-status ${dataHealthStatus.toLowerCase().replace(' ', '-')}`}>{dataHealthStatus}</strong>
+                <div className="data-health-detail"><span>Source</span><b>{overview?.source === 'exasol' || health?.mode === 'live' ? 'Exasol' : 'CSV fixture'}</b></div>
+                <div className="data-health-detail"><span>Last updated</span><b>{lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</b></div>
+                <button type="button" className="data-health-link" onClick={() => { setSection('data'); setError(''); }}>View details <ArrowRight size={13} /></button>
+              </div>
             </section>
           </div>
           <section className="panel channel-panel"><div className="panel-head"><div><h2>Channel performance</h2><p>Aggregated from records in the current filter window</p></div><span className="mini-tag">{overview?.channels?.length || 0} CHANNELS</span></div>
@@ -341,7 +349,12 @@ export default function Home() {
               <QualityRow label="Last ingestion" value={dataset?.ingested_at ? new Date(dataset.ingested_at).toLocaleString() : dataset?.source || '—'} />
               <p className="panel-foot">This upload replaces the active dataset table. An identical file is recognized by its content hash and is not reloaded.</p>
             </section></div>
-          {dataset && Array.isArray(dataset.warnings) && dataset.warnings.length > 0 && <section className="panel"><div className="panel-head"><div><h2>Validation notes</h2><p>Data limitations reported during ingestion</p></div></div>{dataset.warnings.map((warning: string) => <div className="quality-row" key={warning}><CircleHelp size={14} /><span>{warning}</span></div>)}</section>}
+            <section className="panel"><div className="panel-head"><div><h2>Data validation</h2><p>Record quality and known dataset limitations</p></div></div>
+              <QualityRow label="Records in current view" value={number(overview?.quality?.rows)} />
+              <QualityRow label="Duplicate IDs" value={number(overview?.quality?.duplicate_ids)} warning={Number(overview?.quality?.duplicate_ids || 0) > 0} />
+              <QualityRow label="Currency" value={overview?.quality?.currency_note || 'Not specified'} warning />
+              {dataset && Array.isArray(dataset.warnings) && dataset.warnings.map((warning: string) => <div className="quality-row" key={warning}><CircleHelp size={14} /><span>{warning}</span></div>)}
+            </section>
         </>}
 
         {section === 'summary' && <><div className="page-heading"><div><div className="eyebrow">AI · SUMMARIZATION ONLY</div><h1>Dataset summary</h1><p>The AI describes patterns in the data. It does not diagnose causes or recommend actions.</p></div><button className="sync-button" onClick={() => void generateSummary()} disabled={busy || !overview}><Sparkles size={15} />{busy ? 'Summarizing…' : 'Summarize all rows'}</button></div>

@@ -20,6 +20,15 @@ select{color-scheme:dark}body[data-theme="light"] select{color-scheme:light}sele
 .data-status-time{font:9px var(--mono);color:var(--muted)}
 .data-refresh{flex:none;width:24px;height:24px;color:var(--muted)}
 .data-refresh:hover{background:var(--panel2);color:var(--text)}
+.data-health-panel .panel-head{min-height:48px;padding-block:10px}
+.data-health-content{padding:0 15px 12px}
+.data-health-status{display:block;margin:0 0 7px;font-size:13px;font-weight:650;color:var(--green)}
+.data-health-status.unavailable,.data-health-status.no-dataset{color:var(--amber)}
+.data-health-status.checking{color:var(--muted)}
+.data-health-detail{display:flex;justify-content:space-between;gap:8px;padding:5px 0;color:var(--muted);font-size:9px}
+.data-health-detail b{color:var(--muted2);font:9px var(--mono);text-align:right}
+.data-health-link{display:inline-flex;width:auto;height:auto;margin:7px 0 0;padding:0;border:0;background:transparent;color:var(--muted2);font-size:9px;font-weight:500}
+.data-health-link:hover{background:transparent;color:var(--text)}
 .chart-metric{display:flex;align-items:center;gap:4px}
 .chart-info{width:16px;height:16px;padding:0;border:0;background:transparent;color:var(--muted);display:inline-grid;place-items:center}
 .chart-info:hover{background:transparent;color:var(--text)}
