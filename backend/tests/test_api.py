@@ -327,7 +327,21 @@ def test_decisions_require_approval_before_simulation_and_never_execute_live(mon
     assert done.json()["status"] == "proposed"
     assert done.json()["restored_state"] == "proposed"
     assert client.post(path, json={"reason": "Budget changed"}).status_code == 409
+
+    # A rejected decision can also be rolled back to Pending.
+    with app_module.decision_store() as db:
+        db.execute(
+            "INSERT INTO decisions (decision_id, dataset_id, target, evidence_json, status, updated_at) "
+            "VALUES ('rej1', 'dataset', 'x|y', '{}', 'proposed', 't')"
+        )
+        db.commit()
+    assert client.post("/api/recommendations/rej1/reject", json={"reason": "no"}).json()["status"] == "rejected"
+    undone = client.post("/api/recommendations/rej1/rollback", json={"reason": "Decision was incorrect"})
+    assert undone.status_code == 200 and undone.json()["status"] == "proposed"
+    assert client.post("/api/recommendations/rej1/rollback", json={"reason": "Budget changed"}).status_code == 409
     audit = client.get("/api/rollback-audit").json()["items"]
+    assert audit[0]["previous_state"] == "proposed" and audit[0]["rolled_back_state"] == "rejected"
+    audit = [a for a in audit if a["decision_id"] != "rej1"]
     assert audit[0]["previous_state"] == "approved" and audit[0]["performed_by"] == "Tester"
     history = client.get("/api/decision-history").json()["items"]
     assert [e["status"] for e in history].count("simulated") == 1

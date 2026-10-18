@@ -425,22 +425,25 @@ def decision_db() -> sqlite3.Connection:
         )
         """
     )
-    db.execute("UPDATE decisions SET status = 'proposed' WHERE status IN ('rejected', 'rolled_back')")
     db.commit()
     return db
 
 
-def rollback_context(db: sqlite3.Connection, decision_id: str) -> dict[str, Any]:
+def rollback_context(db: sqlite3.Connection, decision_id: str, status: str) -> dict[str, Any]:
     """Previous state (from recorded history) and any newer decision on the same target."""
     events = db.execute(
         "SELECT event_id, status FROM decision_events WHERE decision_id = ? ORDER BY event_id",
         (decision_id,),
     ).fetchall()
-    applied = [i for i, e in enumerate(events) if e["status"] == "simulated"]
+    applied = [i for i, e in enumerate(events) if e["status"] == status]
     if not applied:
         return {"previous_state": None, "conflict": None}
     index = applied[-1]
     previous = events[index - 1]["status"] if index > 0 else "proposed"
+    if previous == "rolled_back":
+        previous = "proposed"
+    if status != "simulated":
+        return {"previous_state": previous, "conflict": None}
     target = db.execute(
         "SELECT target FROM decisions WHERE decision_id = ?", (decision_id,)
     ).fetchone()
@@ -888,8 +891,8 @@ def recommendations() -> dict[str, Any]:
             if state:
                 item["status"] = state["status"]
                 item["reason"] = state["reason"]
-                if state["status"] == "simulated":
-                    item["rollback"] = rollback_context(db, item["id"])
+                if state["status"] in {"simulated", "rejected"}:
+                    item["rollback"] = rollback_context(db, item["id"], state["status"])
     return {"source": source, "items": candidates}
 
 
@@ -909,14 +912,12 @@ def rollback_recommendation(decision_id: str, body: RollbackRequest) -> dict[str
         ).fetchone()
         if not current:
             raise HTTPException(status_code=404, detail="Recommendation was not found.")
-        if current["status"] == "rolled_back":
-            raise HTTPException(status_code=409, detail="This decision has already been rolled back.")
-        if current["status"] != "simulated":
+        if current["status"] not in {"simulated", "rejected"}:
             raise HTTPException(
                 status_code=409,
-                detail=f"Only applied decisions can be rolled back; this one is {current['status']}.",
+                detail=f"Only applied or rejected decisions can be rolled back; this one is {current['status']}.",
             )
-        context = rollback_context(db, decision_id)
+        context = rollback_context(db, decision_id, current["status"])
         if context["conflict"]:
             raise HTTPException(status_code=409, detail=context["conflict"])
         now = datetime.now(timezone.utc).isoformat()
@@ -934,7 +935,7 @@ def rollback_recommendation(decision_id: str, body: RollbackRequest) -> dict[str
             (decision_id, previous_state, rolled_back_state, reason, performed_by, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (decision_id, context["previous_state"], "simulated", reason, user, now),
+            (decision_id, context["previous_state"], current["status"], reason, user, now),
         )
         db.commit()
     return {
@@ -991,7 +992,7 @@ def update_recommendation(
         if action == "reject" and not body.reason.strip():
             raise HTTPException(status_code=422, detail="A rejection reason is required.")
         now = datetime.now(timezone.utc).isoformat()
-        stored = "proposed" if action == "reject" else after
+        stored = after
         db.execute(
             "UPDATE decisions SET status = ?, reason = ?, updated_at = ? WHERE decision_id = ?",
             (stored, body.reason.strip(), now, decision_id),
