@@ -17,7 +17,7 @@ type Section =
   | 'creatives' | 'execution' | 'learning' | 'copilot' | 'settings' | 'scenarios';
 
 const navItems: { id: Section; label: string; group: string; icon: typeof Gauge }[] = [
-  { id: 'overview', label: 'Command center', group: 'WORKSPACE', icon: Gauge },
+  { id: 'overview', label: 'Action Center', group: 'WORKSPACE', icon: Gauge },
   { id: 'data', label: 'Unified data hub', group: 'WORKSPACE', icon: Database },
   { id: 'campaigns', label: 'Performance Explorer', group: 'INTELLIGENCE', icon: BarChart3 },
   { id: 'insights', label: 'Anomaly & diagnosis', group: 'INTELLIGENCE', icon: TriangleAlert },
@@ -33,6 +33,26 @@ const navItems: { id: Section; label: string; group: string; icon: typeof Gauge 
   { id: 'settings', label: 'Settings', group: 'SYSTEM', icon: Settings2 },
   { id: 'scenarios', label: 'Scenario guide', group: 'SYSTEM', icon: FileSpreadsheet },
 ];
+
+type Priority = 'High' | 'Medium' | 'Low';
+type ActionItem = { key: string; category: string; title: string; text: string; metric?: string; priority?: Priority; target: Section; cta: string };
+const priorityRank: Record<Priority, number> = { High: 0, Medium: 1, Low: 2 };
+
+function PriorityBadge({ level }: { level: Priority }) {
+  const Icon = level === 'High' ? TriangleAlert : level === 'Medium' ? Activity : Bell;
+  return <span className={`priority ${level.toLowerCase()}`}><Icon size={11} />{level}</span>;
+}
+function ActionCard({ item, onGo }: { item: ActionItem; onGo: (target: Section) => void }) {
+  return <div className="ac-item">
+    <div className="ac-item-main">
+      <div className="ac-item-meta"><span>{item.category}</span>{item.priority && <PriorityBadge level={item.priority} />}</div>
+      <b>{item.title}</b>
+      <p>{item.text}</p>
+      {item.metric && <small>{item.metric}</small>}
+    </div>
+    <button type="button" className="ac-link" onClick={() => onGo(item.target)}>{item.cta} <ArrowRight size={12} /></button>
+  </div>;
+}
 
 function money(value: number | null | undefined, digits = 0) {
   if (value == null || !Number.isFinite(Number(value))) return 'Unavailable';
@@ -156,6 +176,7 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [message, setMessage] = useState('');
   const [summary, setSummary] = useState<Payload | null>(null);
+  const [decisionsReady, setDecisionsReady] = useState(false);
   const [light, setLight] = useState(false);
 
   const dateRange = useMemo(() => {
@@ -223,14 +244,16 @@ export default function Home() {
       ]);
       setRecommendations(recommendationData.items || []);
       setHistory(historyData.items || []);
+      setDecisionsReady(true);
     } catch (err) {
+      setDecisionsReady(false);
       setError(err instanceof Error ? err.message : 'Could not load decision records.');
     }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
-  useEffect(() => { if (section === 'campaigns' || section === 'opportunities') void loadCampaigns(); }, [section, loadCampaigns]);
-  useEffect(() => { if (section === 'decisions' || section === 'execution') void loadDecisions(); }, [section, loadDecisions]);
+  useEffect(() => { if (section === 'campaigns' || section === 'opportunities' || section === 'overview') void loadCampaigns(); }, [section, loadCampaigns]);
+  useEffect(() => { if (section === 'decisions' || section === 'execution' || section === 'overview') void loadDecisions(); }, [section, loadDecisions]);
   useEffect(() => { document.body.dataset.theme = light ? 'light' : 'dark'; }, [light]);
 
   async function uploadCsv(event: FormEvent<HTMLFormElement>) {
@@ -416,6 +439,90 @@ export default function Home() {
     ? `${dateOnly(trendDates[0])} – ${dateOnly(trendDates[trendDates.length - 1])}`
     : 'Not checked';
 
+  const goTo = (target: Section) => { setSection(target); setError(''); };
+  const clock = (value: Date) => value.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const pendingDecisions: Payload[] = recommendations.filter((item) => item.status === 'proposed');
+  const trendDays: Payload[] = overview?.trend || [];
+  const lastDay = trendDays.length ? new Date(trendDays[trendDays.length - 1].date).getTime() : null;
+  const roasChange = (() => {
+    if (lastDay === null) return null;
+    const span = 30 * 86400000;
+    const totals = (from: number, to: number) => trendDays.reduce((sum, day) => {
+      const time = new Date(day.date).getTime();
+      return time > from && time <= to ? { spend: sum.spend + Number(day.spend || 0), revenue: sum.revenue + Number(day.revenue || 0) } : sum;
+    }, { spend: 0, revenue: 0 });
+    const recent = totals(lastDay - span, lastDay);
+    const previous = totals(lastDay - 2 * span, lastDay - span);
+    if (recent.spend <= 0 || previous.spend <= 0 || previous.revenue <= 0) return null;
+    const recentRoas = recent.revenue / recent.spend;
+    const previousRoas = previous.revenue / previous.spend;
+    return { recent: recentRoas, previous: previousRoas, pct: ((recentRoas - previousRoas) / previousRoas) * 100 };
+  })();
+  const dataWarning = qualityChecked && (Number(duplicateRecordCount) > 0 || Number(missingValueCount) > 0);
+  const totalSpend = Number(metrics?.spend) || 0;
+  const roasMetric = roasChange ? `ROAS ${roasText(roasChange.previous)} → ${roasText(roasChange.recent)}` : undefined;
+  const roasDropPriority: Priority = roasChange && roasChange.pct <= -25 ? 'High' : 'Medium';
+
+  const attentionItems: ActionItem[] = [];
+  if (roasChange && roasChange.pct <= -10) attentionItems.push({ key: 'roas', category: 'Performance Warning', title: 'ROAS decline detected', text: 'Possible issue: ROAS is lower than in the previous 30 days of data.', metric: roasMetric, priority: roasDropPriority, target: 'campaigns', cta: 'Investigate' });
+  if (metrics && Number(metrics.return_adjusted_net_profit) < 0) attentionItems.push({ key: 'profit', category: 'Performance Warning', title: 'Adjusted profit is negative', text: 'Return-adjusted profit is below zero for the selected period.', metric: `Adjusted Profit ${fullNumber(metrics.return_adjusted_net_profit)}`, priority: 'High', target: 'campaigns', cta: 'View Performance' });
+  if (radar?.gaps.length) attentionItems.push({ key: 'gaps', category: 'Budget Issue', title: `${radar.gaps.length} campaigns well below blended ROAS`, text: 'Possible budget inefficiency among campaigns with above-median spend.', metric: `Lowest: ${radar.gaps[0].campaign_id} at ${roasText(radar.gaps[0].roas)}`, priority: 'Medium', target: 'optimizer', cta: 'Review Budget' });
+  if (pendingDecisions.length) attentionItems.push({ key: 'decisions', category: 'Pending Decision', title: `${pendingDecisions.length} ${pendingDecisions.length === 1 ? 'decision is' : 'decisions are'} waiting for review`, text: 'Investigation candidates have not been approved or rejected yet.', priority: 'Medium', target: 'decisions', cta: 'Review Decisions' });
+  if (dataWarning) attentionItems.push({ key: 'data', category: 'Data Warning', title: 'Data quality issue detected', text: 'Some records need review before relying on the numbers.', priority: Number(duplicateRecordCount) > 0 ? 'Medium' : 'Low', target: 'data', cta: 'View Details' });
+  if (radar?.unusual.length) attentionItems.push({ key: 'anomaly', category: 'Anomaly', title: `${radar.unusual.length} unusual revenue ${radar.unusual.length === 1 ? 'day' : 'days'}`, text: 'Revenue differed sharply from the daily average. Cause not determined.', priority: 'Low', target: 'insights', cta: 'Review Anomalies' });
+  attentionItems.sort((a, b) => priorityRank[a.priority ?? 'Low'] - priorityRank[b.priority ?? 'Low']);
+
+  const decisionItems: ActionItem[] = pendingDecisions.slice(0, 3).map((item) => ({
+    key: item.id, category: 'Awaiting Review', title: item.title,
+    text: `${item.channel === item.ad_platform ? item.channel : `${item.channel} · ${item.ad_platform}`}. Negative return-adjusted profit across the dataset.`,
+    metric: `Adjusted Profit ${fullNumber(item.evidence?.return_adjusted_net_profit)} on ${fullNumber(item.evidence?.ad_spend)} spend`,
+    target: 'decisions', cta: 'Review Decision',
+  }));
+
+  const opportunityItems: ActionItem[] = (radar?.highRoas || []).slice(0, 3).map((row) => ({
+    key: `${row.campaign_id}-${row.sku_id}-${row.ad_platform}`, category: 'Potential Opportunity', title: `${row.campaign_id}`,
+    text: `High-efficiency campaign on ${row.channel}. Worth reviewing.`,
+    metric: `ROAS ${roasText(row.roas)}${totalSpend ? ` · Spend share ${(Number(row.spend) / totalSpend * 100).toFixed(1)}%` : ''}`,
+    target: 'opportunities', cta: 'Explore Opportunity',
+  }));
+  if (radar?.realloc && opportunityItems.length < 3) opportunityItems.push({ key: 'realloc', category: 'Budget Opportunity', title: `Budget shift from ${radar.realloc.from.channel} to ${radar.realloc.to.channel}`, text: 'Channel ROAS differs noticeably. Worth reviewing.', metric: `ROAS ${roasText(radar.realloc.from.roas)} vs ${roasText(radar.realloc.to.roas)}`, target: 'opportunities', cta: 'Explore Opportunity' });
+
+  const alertItems: { key: string; time: string; type: string; text: string; severity: Priority; target: Section }[] = [];
+  (radar?.unusual || []).forEach((day) => alertItems.push({ key: `day-${day.date}`, time: dateOnly(day.date), type: 'Anomaly Detected', text: `Revenue was ${day.z > 0 ? 'above' : 'below'} the daily average (${fullNumber(day.revenue)} vs ${fullNumber(radar?.mean)}).`, severity: Math.abs(day.z) >= 3 ? 'Medium' : 'Low', target: 'insights' }));
+  if (roasChange && roasChange.pct <= -10) alertItems.push({ key: 'roas', time: dateOnly(trendDays[trendDays.length - 1]?.date), type: 'Performance Alert', text: `ROAS fell ${Math.abs(roasChange.pct).toFixed(0)}% versus the previous 30 days of data.`, severity: roasDropPriority, target: 'campaigns' });
+  if (dataWarning && lastUpdated) alertItems.push({ key: 'data', time: clock(lastUpdated), type: 'Data Warning', text: 'Data quality issue detected.', severity: 'Low', target: 'data' });
+  if (!loading && health?.status !== 'ok' && lastUpdated) alertItems.push({ key: 'sync', time: clock(lastUpdated), type: 'Sync Issue', text: 'The data source is not responding.', severity: 'Medium', target: 'data' });
+  alertItems.sort((a, b) => priorityRank[a.severity] - priorityRank[b.severity]);
+
+  const activityLabels: Record<string, string> = { approved: 'Decision approved', rejected: 'Decision rejected', simulated: 'Investigation simulated' };
+  const activityItems: { key: string; label: string; time: string; detail?: string }[] = [
+    ...(lastUpdated ? [{ key: 'refresh', label: 'Dataset refreshed', time: clock(lastUpdated), detail: dataSourceName }] : []),
+    ...history.slice(0, 4).map((event, index) => ({ key: `${event.decision_id}-${index}`, label: activityLabels[event.status] || 'Decision updated', time: clock(new Date(event.created_at)), detail: String(event.target || '').replace('|', ' / ') })),
+  ];
+
+  const briefItems: ActionItem[] = [];
+  if (roasChange) briefItems.push({ key: 'roas', category: 'Performance Change', title: roasChange.pct <= -10 ? 'ROAS declined' : roasChange.pct >= 10 ? 'ROAS improved' : 'ROAS is steady', text: `Compared with the previous 30 days of data (${roasChange.pct >= 0 ? '+' : ''}${roasChange.pct.toFixed(0)}%).`, metric: roasMetric, priority: roasChange.pct <= -10 ? roasDropPriority : undefined, target: 'campaigns', cta: 'View Performance' });
+  if (opportunityItems[0]) briefItems.push({ ...opportunityItems[0], key: 'brief-opportunity', category: 'Opportunity', title: `${radar?.highRoas.length ?? 0} high-ROAS ${radar?.highRoas.length === 1 ? 'campaign' : 'campaigns'} to review`, text: `${opportunityItems[0].title} leads on efficiency.`, cta: 'View Opportunity' });
+  if (pendingDecisions.length) briefItems.push({ key: 'brief-decision', category: 'Decision Pending', title: `${pendingDecisions.length} ${pendingDecisions.length === 1 ? 'recommendation is' : 'recommendations are'} waiting for review`, text: pendingDecisions[0].title, priority: 'Medium', target: 'decisions', cta: 'Review Decision' });
+  if (radar?.realloc) briefItems.push({ key: 'brief-budget', category: 'Budget', title: `ROAS differs across channels`, text: `${radar.realloc.to.channel} is highest and ${radar.realloc.from.channel} is lowest.`, metric: `ROAS ${roasText(radar.realloc.to.roas)} vs ${roasText(radar.realloc.from.roas)}`, target: 'optimizer', cta: 'Review Budget' });
+  if (dataWarning) briefItems.push({ key: 'brief-data', category: 'Data Warning', title: 'Data quality issue detected', text: 'Some records need review.', priority: 'Low', target: 'data', cta: 'View Details' });
+  const brief = briefItems.slice(0, 5);
+
+  const healthRows: { label: string; value: string; tone: string }[] = [
+    { label: 'Data Source', value: loading ? 'Checking' : health?.status === 'ok' ? 'Connected' : 'Offline', tone: loading ? 'neutral' : health?.status === 'ok' ? 'good' : 'warn' },
+    { label: 'Last Updated', value: lastUpdated ? clock(lastUpdated) : '—', tone: 'neutral' },
+    { label: 'Data Health', value: !qualityChecked ? 'Not checked' : dataWarning ? 'Needs Attention' : 'Healthy', tone: !qualityChecked ? 'neutral' : dataWarning ? 'warn' : 'good' },
+    { label: 'Decision Engine', value: decisionsReady ? 'Ready' : 'Limited', tone: decisionsReady ? 'good' : 'warn' },
+  ];
+  const quickActions: { label: string; target: Section; icon: typeof Gauge }[] = [
+    { label: 'Explore Performance', target: 'campaigns', icon: BarChart3 },
+    { label: 'Review Anomalies', target: 'insights', icon: TriangleAlert },
+    { label: 'View Opportunities', target: 'opportunities', icon: Target },
+    { label: 'Open Decision Center', target: 'decisions', icon: Check },
+    { label: 'Run Budget Simulation', target: 'optimizer', icon: TrendingUp },
+    { label: 'Ask AI Copilot', target: 'copilot', icon: Command },
+  ];
+
   return <div className="shell">
     <aside className="sidebar">
       <div className="brand-row"><div className="brand-mark"><Orbit size={18} /></div><b>ADPILOT</b><span className="beta">LAB</span></div>
@@ -457,32 +564,39 @@ export default function Home() {
         {message && <div className="notice success" role="status"><Check size={16} />{message}<button onClick={() => setMessage('')} aria-label="Dismiss"><X size={14} /></button></div>}
 
         {section === 'overview' && <>
-          <div className="page-heading"><div><div className="eyebrow">Last updated: {lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</div><h1>Campaign performance overview</h1><p>Monitor advertising performance and compare results across your channels.</p></div></div>
-          {loading ? <div className="state-card"><LoaderCircle className="spin" />Loading campaign data…</div> : metrics && <div className="stats-grid">
-            <Stat icon={<BarChart3 size={16} />} label="Total ad spend" value={money(metrics.spend)} note="Observed · currency unspecified" />
-            <Stat icon={<TrendingUp size={16} />} label="Attributed revenue" value={money(metrics.attributed_revenue)} note="Not reconciled · currency unspecified" />
-            <Stat icon={<Target size={16} />} label="Return-adjusted profit" value={money(metrics.return_adjusted_net_profit)} note="Dataset measure · currency unspecified" />
-            <Stat icon={<Gauge size={16} />} label="Blended ROAS" value={ratio(metrics.roas)} note="Aggregate attributed revenue / spend" />
-            <Stat icon={<Activity size={16} />} label="Conversions" value={number(metrics.conversions)} note="Observed records in selected window" />
-            <Stat icon={<TrendingUp size={16} />} label="Cost per conversion" value={money(metrics.cpa, 2)} note="Total spend / total conversions" />
-          </div>}
-          <div className="dashboard-grid">
-            <section className="panel pulse-panel"><div className="panel-head"><div><h2>Performance Trend</h2><p className="chart-metric">Attributed Revenue <button type="button" className="chart-info" title="Revenue values are taken from the supplied campaign dataset and may differ from reconciled business revenue." aria-label="About attributed revenue"><CircleHelp size={13} /></button></p></div></div>
-              {trendValues.length ? <div className="chart-wrap"><AreaLine values={trendValues} /><div className="chart-foot"><span>{dateOnly(overview?.trend?.[0]?.date)}</span><span>{dateOnly(overview?.trend?.[overview.trend.length - 1]?.date)}</span></div></div> : <Empty text={error || 'No trend records for this filter.'} />}
+          <div className="page-heading"><div><h1>Action Center</h1><p>Review what needs attention, what requires a decision, and what action to take next.</p></div></div>
+          <div className="ac-grid">
+            <section className="panel ac-panel ac-brief"><div className="panel-head"><div><h2>Today’s Brief</h2></div></div>
+              {loading ? <div className="state-card"><LoaderCircle className="spin" />Loading updates…</div> : brief.length ? <div className="ac-brief-grid">{brief.map((item) => <ActionCard key={item.key} item={item} onGo={goTo} />)}</div> : <p className="ac-empty">No updates to report right now.</p>}
             </section>
-            <section className="panel source-panel data-health-panel"><div className="panel-head"><div><h2>Data Health</h2></div><Database size={17} /></div>
-              <div className="data-health-content">
-                <strong className={`data-health-status ${dataHealthStatus.toLowerCase().replace(/\s+/g, '-')}`}>{dataHealthStatus}</strong>
-                <div className="data-health-detail"><span>Source</span><b>{health?.mode === 'live' ? 'Exasol' : dataset?.status === 'ready' ? 'Uploaded CSV' : 'Demo Dataset'}</b></div>
-                <div className="data-health-detail"><span>Last updated</span><b>{lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</b></div>
-                <button type="button" className="data-health-link" onClick={() => { setSection('data'); setError(''); }}>View details <ArrowRight size={13} /></button>
-              </div>
+            <section className="panel ac-panel ac-attention"><div className="panel-head"><div><h2>Needs Attention</h2></div>{attentionItems.length > 0 && <span className="mini-tag">{attentionItems.length}</span>}</div>
+              {attentionItems.length ? attentionItems.map((item) => <ActionCard key={item.key} item={item} onGo={goTo} />) : <p className="ac-empty">Nothing needs attention right now.</p>}
+            </section>
+            <section className="panel ac-panel ac-decisions"><div className="panel-head"><div><h2>Pending Decisions</h2></div>{pendingDecisions.length > 0 && <span className="mini-tag">{pendingDecisions.length}</span>}</div>
+              {decisionItems.length ? decisionItems.map((item) => <ActionCard key={item.key} item={item} onGo={goTo} />) : <p className="ac-empty">No decisions are waiting for review.</p>}
+              {pendingDecisions.length > decisionItems.length && <button type="button" className="ac-more" onClick={() => goTo('decisions')}>View all {pendingDecisions.length} decisions <ArrowRight size={12} /></button>}
+            </section>
+            <section className="panel ac-panel ac-opportunities"><div className="panel-head"><div><h2>Top Opportunities</h2></div></div>
+              {opportunityItems.length ? opportunityItems.map((item) => <ActionCard key={item.key} item={item} onGo={goTo} />) : <p className="ac-empty">No opportunities identified for the current filters.</p>}
+            </section>
+            <section className="panel ac-panel ac-alerts"><div className="panel-head"><div><h2>Recent Alerts</h2></div></div>
+              {alertItems.length ? alertItems.slice(0, 5).map((alert) => <div className="ac-alert" key={alert.key}>
+                <div className="ac-item-main"><div className="ac-item-meta"><span>{alert.time}</span><PriorityBadge level={alert.severity} /></div><b>{alert.type}</b><p>{alert.text}</p></div>
+                <button type="button" className="ac-link" onClick={() => goTo(alert.target)}>View Details <ArrowRight size={12} /></button>
+              </div>) : <p className="ac-empty">No recent alerts.</p>}
+            </section>
+            <section className="panel ac-panel ac-activity"><div className="panel-head"><div><h2>Recent Activity</h2></div><button type="button" className="ac-link" onClick={() => goTo('execution')}>View Audit <ArrowRight size={12} /></button></div>
+              {activityItems.length ? activityItems.map((item) => <div className="ac-activity-row" key={item.key}><span><b>{item.label}</b>{item.detail && <small>{item.detail}</small>}</span><time>{item.time}</time></div>) : <p className="ac-empty">No recent activity.</p>}
+            </section>
+            <section className="panel ac-panel ac-health"><div className="panel-head"><div><h2>System Health</h2></div></div>
+              {healthRows.map((row) => <div className="ac-health-row" key={row.label}><span>{row.label}</span><b className={`ac-tone ${row.tone}`}>{row.value}</b></div>)}
+              <button type="button" className="ac-more" onClick={() => goTo('data')}>View Data Details <ArrowRight size={12} /></button>
+            </section>
+            <section className="panel ac-panel ac-quick"><div className="panel-head"><div><h2>Quick Actions</h2></div></div>
+              <div className="ac-quick-grid">{quickActions.map((action) => { const Icon = action.icon; return <button type="button" key={action.label} onClick={() => goTo(action.target)}><Icon size={15} />{action.label}</button>; })}</div>
             </section>
           </div>
-          <section className="panel channel-panel"><div className="panel-head"><div><h2>Channel performance</h2><p>Compare advertising performance across channels.</p></div><span className="mini-tag">{overview?.channels?.length || 0} CHANNELS</span></div>
-            <div className="table-scroll"><table><thead><tr><th>CHANNEL</th><th>RECORDS</th><th>SPEND</th><th>ATTRIBUTED REVENUE</th><th>RETURN-ADJUSTED PROFIT</th><th>ROAS</th></tr></thead><tbody>{(overview?.channels || []).map((item: Payload) => <tr key={item.channel}><td><b>{item.channel}</b></td><td>{number(item.record_count)}</td><td>{money(item.spend)}</td><td>{money(item.attributed_revenue)}</td><td>{money(item.return_adjusted_net_profit)}</td><td><span className="roas">{ratio(item.roas)}</span></td></tr>)}</tbody></table></div>
-          </section>
-          <div className="notice neutral"><CircleHelp size={15} /><span>No inferred causes, automated budget allocations, or live ad-account changes are generated. This dashboard reports the supplied metrics and summarizes them with AI on request.</span></div>
+          <p className="ac-note">Insights are based on available campaign data. No live advertising changes are made automatically.</p>
         </>}
 
         {section === 'campaigns' && <>
