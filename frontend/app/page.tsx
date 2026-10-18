@@ -596,9 +596,8 @@ export default function Home() {
 
   return <div className="shell">
     <aside className="sidebar">
-      <div className="brand-row"><div className="brand-mark"><Orbit size={18} /></div><b>ADPILOT</b><span className="beta">LAB</span></div>
+      <div className="brand-row"><div className="brand-mark"><Orbit size={18} /></div><b>ADPILOT</b></div>
       <button className="brand-switch"><span className="avatar">{settings.workspaceName.charAt(0).toUpperCase()}</span><span><b>{settings.workspaceName}</b><small>D2C workspace</small></span><ChevronDown size={14} /></button>
-      <button className="quick-search" onClick={() => document.getElementById('campaign-search')?.focus()}><Search size={15} /><span>Quick search</span><kbd>⌘ K</kbd></button>
       <nav className="nav" aria-label="Dashboard sections">
         {['WORKSPACE', 'INTELLIGENCE', 'DECISIONING', 'GOVERNANCE', 'SYSTEM'].map((group) => <div className="nav-group" key={group}>
           <div className="nav-label">{group}</div>

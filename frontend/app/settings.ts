@@ -22,7 +22,7 @@ export type Settings = {
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  workspaceName: 'Lumière Skin Co.',
+  workspaceName: 'Aurelia Wellness Pvt. Ltd.',
   currency: 'none',
   timezone: 'browser',
   landing: 'overview',
