@@ -28,6 +28,7 @@ from urllib.parse import quote, urlencode
 HERE = Path(__file__).resolve().parent
 STATE_DIR = HERE / ".state"
 ENV_VAR_NAME = "EXASOL_DSN"
+DEMO_MODE_ENV_VAR_NAME = "ADPILOT_DEMO_MODE"
 TERMINAL_OK = {"live"}
 TERMINAL_FAIL = {"build_failed", "update_failed", "canceled", "pre_deploy_failed"}
 TERMINAL_OTHER = {"deactivated"}  # superseded by a newer deploy
@@ -621,8 +622,13 @@ def sync_once(cfg: Config, client: RenderClient, store: StateStore, hostport: st
                       message=f"Deployment requested: {deploy_id}")
 
 
-def verify_database_query(url: str, transport: Transport = urllib_transport) -> tuple[bool, str]:
-    """Call the backend's existing /api/datasets/status, which runs SELECT COUNT(*) on DQPS.RAW_D2C_DATA."""
+def verify_database_query(
+    url: str,
+    transport: Transport = urllib_transport,
+    *,
+    require_live_mode: bool = False,
+) -> tuple[bool, str]:
+    """Call a backend endpoint that runs SELECT COUNT(*) on DQPS.RAW_D2C_DATA."""
     try:
         status, _, raw = transport("GET", url, {"Accept": "application/json"}, None, 30.0)
     except SyncError as exc:
@@ -633,8 +639,18 @@ def verify_database_query(url: str, transport: Transport = urllib_transport) -> 
         body = json.loads(raw.decode("utf-8"))
     except ValueError:
         return False, "backend response was not JSON"
-    if body.get("status") == "ready" and body.get("source") == "Exasol":
-        return True, f"backend ran COUNT(*) on the dataset table: {body.get('row_count')} rows"
+    if (
+        body.get("status") == "ready"
+        and body.get("source") == "Exasol"
+        and (
+            body.get("mode") == "live"
+            if require_live_mode
+            else body.get("mode") != "demo"
+        )
+    ):
+        return True, f"backend loaded {body.get('row_count')} rows from the Exasol dataset"
+    if require_live_mode and body.get("mode") != "live":
+        return False, "backend is not serving live Exasol mode"
     return False, f"backend reported status={body.get('status')}"
 
 
