@@ -81,6 +81,7 @@ export default function Home() {
   const [overview, setOverview] = useState<Payload | null>(null);
   const [campaigns, setCampaigns] = useState<Payload | null>(null);
   const [dataset, setDataset] = useState<Payload | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [recommendations, setRecommendations] = useState<Payload[]>([]);
   const [history, setHistory] = useState<Payload[]>([]);
   const [channels, setChannels] = useState<string[]>([]);
@@ -125,6 +126,7 @@ export default function Home() {
       setOverview(overviewData);
       setDataset(statusData);
       setChannels(filterData.channels || []);
+      setLastUpdated(new Date());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load dashboard data.');
       setOverview(null);
@@ -237,7 +239,14 @@ export default function Home() {
 
   const metrics = overview?.metrics;
   const trendValues = (overview?.trend || []).map((item: Payload) => Number(item.revenue || 0));
-  const activityLabel = loading ? 'Loading' : overview ? `${number(metrics?.record_count)} records` : 'No dataset';
+  const sourceLabel = health?.mode === 'demo' ? 'CSV demo' : 'Exasol';
+  const sourceStatus = loading
+    ? 'Checking'
+    : health?.mode === 'demo'
+      ? 'Demo'
+      : health?.status === 'ok'
+        ? 'Connected'
+        : 'Offline';
 
   return <div className="shell">
     <aside className="sidebar">
@@ -253,7 +262,6 @@ export default function Home() {
           })}
         </div>)}
       </nav>
-      <div className="sidebar-bottom"><span className={`health-dot ${health?.status === 'ok' ? '' : 'offline'}`} /><span>{health?.mode === 'demo' ? 'CSV DEMO MODE' : health?.status === 'ok' ? 'EXASOL CONNECTED' : 'DATA SOURCE OFFLINE'}</span><span className="record-pill">{activityLabel}</span><small>Profit over platform ROAS.</small></div>
     </aside>
 
     <main className="main-column">
@@ -262,7 +270,17 @@ export default function Home() {
           <label className="select-group"><small>PERIOD</small><select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={0}>All data</option><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option><option value={365}>Last 12 months</option></select></label>
           <label className="select-group"><small>CHANNEL</small><select value={channel} onChange={(event) => setChannel(event.target.value)}><option value="">All channels</option>{channels.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
           <button className="icon-button" title={light ? 'Switch to dark theme' : 'Switch to light theme'} onClick={() => setLight(!light)}>{light ? <Moon size={16} /> : <Sun size={16} />}</button>
-          <button className="sync-button" onClick={() => void refresh()} disabled={loading}><RefreshCw size={14} className={loading ? 'spin' : ''} /> Sync data</button>
+          <div className="data-status" aria-label="Data source status">
+            <span className="data-status-source">
+              <span className={`health-dot ${loading ? 'checking' : health?.status === 'ok' ? '' : 'offline'}`} />
+              Data source: <strong>{sourceLabel}</strong>
+              <span className={`data-status-state ${sourceStatus.toLowerCase()}`}>{sourceStatus}</span>
+            </span>
+            <span className="data-status-time">Last updated: {lastUpdated ? lastUpdated.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</span>
+            <button className="icon-button data-refresh" onClick={() => void refresh()} disabled={loading} title="Refresh data" aria-label="Refresh data">
+              <RefreshCw size={14} className={loading ? 'spin' : ''} />
+            </button>
+          </div>
         </div>
       </header>
 
