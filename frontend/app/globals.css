@@ -18,5 +18,6 @@ select{color-scheme:dark}body[data-theme="light"] select{color-scheme:light}sele
 .data-status-state.checking{color:var(--muted)}
 .data-status-state.demo{color:var(--muted2)}
 .data-status-time{font:9px var(--mono);color:var(--muted)}
-.data-refresh{flex:none}
+.data-refresh{flex:none;width:24px;height:24px;color:var(--muted)}
+.data-refresh:hover{background:var(--panel2);color:var(--text)}
 @media(max-width:760px){.data-status{gap:7px;padding-left:8px}.data-status-time{max-width:116px;overflow:hidden;text-overflow:ellipsis}}
