@@ -210,7 +210,7 @@ class DatabaseHelper:
 
             self._set_step(job_id, "verifying", "Verifying a real query against DQPS.RAW_D2C_DATA.")
             verified, _detail = nrs.verify_database_query(
-                f"{self.backend_url}/api/datasets/status"
+                f"{self.backend_url}/api/db/start/verify"
             )
             if not verified:
                 raise RuntimeError("The live Exasol dataset query could not be verified.")

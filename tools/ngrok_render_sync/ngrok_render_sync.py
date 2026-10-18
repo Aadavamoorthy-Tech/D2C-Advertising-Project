@@ -622,7 +622,7 @@ def sync_once(cfg: Config, client: RenderClient, store: StateStore, hostport: st
 
 
 def verify_database_query(url: str, transport: Transport = urllib_transport) -> tuple[bool, str]:
-    """Call the backend's existing /api/datasets/status, which runs SELECT COUNT(*) on DQPS.RAW_D2C_DATA."""
+    """Call a backend endpoint that runs SELECT COUNT(*) on DQPS.RAW_D2C_DATA."""
     try:
         status, _, raw = transport("GET", url, {"Accept": "application/json"}, None, 30.0)
     except SyncError as exc:

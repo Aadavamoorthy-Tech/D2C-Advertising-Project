@@ -1239,16 +1239,10 @@ def _exasol_is_reachable() -> bool:
         return False
 
 
-def _db_start_demo_guard() -> None:
-    if DEMO_MODE:
-        raise HTTPException(status_code=404, detail="Database startup is not applicable in demo mode.")
-
-
 @app.post("/api/db/start")
 def request_database_start(
     response: Response,
 ) -> dict[str, Any]:
-    _db_start_demo_guard()
     global _db_start_last_request, _db_start_claimed_job
     with _db_start_lock:
         if _db_start_job["state"] in {"checking", "running"}:
@@ -1304,7 +1298,6 @@ def request_database_start(
 
 @app.get("/api/db/start/status")
 def database_start_status() -> dict[str, Any]:
-    _db_start_demo_guard()
     state = _db_start_public_state()
     if state["state"] in {"idle", "already_running"}:
         reachable = _exasol_is_reachable()
@@ -1329,11 +1322,32 @@ def database_start_status() -> dict[str, Any]:
     return {key: state[key] for key in ("helper_online", "state", "step", "message", "updated_at")}
 
 
+@app.get("/api/db/start/verify", include_in_schema=False)
+def verify_database_start() -> Any:
+    try:
+        with exasol_connection() as conn:
+            count = conn.execute(f"SELECT COUNT(*) FROM {SOURCE_TABLE}").fetchone()[0]
+        return {
+            "status": "ready" if count else "not_loaded",
+            "row_count": int(count),
+            "source": "Exasol",
+        }
+    except Exception as exc:
+        logger.info("Database-start verification failed (%s).", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unavailable",
+                "source": "Exasol",
+                "error": f"Connection failed ({type(exc).__name__}); check backend configuration.",
+            },
+        )
+
+
 @app.get("/api/helper/poll")
 def helper_poll(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _db_start_demo_guard()
     _require_service_token(authorization, "HELPER_TOKEN")
     global _db_start_last_heartbeat, _db_start_claimed_job, _db_start_claimed_at
     with _db_start_lock:
@@ -1357,7 +1371,6 @@ def helper_report(
     report: HelperReport,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _db_start_demo_guard()
     _require_service_token(authorization, "HELPER_TOKEN")
     global _db_start_last_heartbeat, _db_start_claimed_job
     message = " ".join("".join(char for char in report.message if char >= " " and char != "\x7f").split())

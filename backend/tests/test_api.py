@@ -509,7 +509,37 @@ def test_helper_report_reconstructs_progress_after_backend_state_reset(helper_ap
     assert client.get("/api/db/start/status").json()["step"] == "deploying"
 
 
-def test_db_start_endpoints_are_not_applicable_in_demo_mode(helper_api, monkeypatch):
+def test_database_start_workflow_is_available_in_demo_mode(helper_api, monkeypatch):
     monkeypatch.setattr(app_module, "DEMO_MODE", True)
-    assert client.post("/api/db/start").status_code == 404
-    assert client.get("/api/db/start/status").status_code == 404
+    started = client.post("/api/db/start")
+    assert started.status_code == 202
+    assert started.json()["state"] == "running"
+    assert client.get("/api/db/start/status").status_code == 200
+    assert client.get(
+        "/api/helper/poll",
+        headers={"Authorization": "Bearer test-helper-token"},
+    ).json() == {"action": "start", "job_id": started.json()["job_id"]}
+
+
+def test_database_start_verification_queries_exasol_in_demo_mode(helper_api, monkeypatch):
+    from contextlib import nullcontext
+
+    class FakeConnection:
+        def execute(self, query):
+            assert query == f"SELECT COUNT(*) FROM {app_module.SOURCE_TABLE}"
+            return self
+
+        def fetchone(self):
+            return (42,)
+
+    monkeypatch.setattr(app_module, "DEMO_MODE", True)
+    monkeypatch.setattr(
+        app_module,
+        "exasol_connection",
+        lambda: nullcontext(FakeConnection()),
+    )
+
+    response = client.get("/api/db/start/verify")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready", "row_count": 42, "source": "Exasol"}

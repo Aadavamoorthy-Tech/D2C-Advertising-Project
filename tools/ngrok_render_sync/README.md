@@ -108,16 +108,16 @@ Your laptop must be powered on, logged in, awake, online, and running Exasol/ngr
 
 ## Hosted “Start database” button
 
-The Action Center button is one-click: there is no browser admin token. The backend first checks the configured
-Exasol connection; if it answers `SELECT 1`, it reports **Database is already running** without needing the
-helper. Otherwise it queues a job only when the helper heartbeat is recent. The helper polls every 15 seconds
-using `HELPER_TOKEN`, then:
+The Action Center button is shown in CSV demo mode and is one-click: there is no browser admin token. The
+backend first checks the configured Exasol connection; if it answers `SELECT 1`, it reports **Database is
+already running** without needing the helper. Otherwise it queues a job only when the helper heartbeat is
+recent. The helper polls every 15 seconds using `HELPER_TOKEN`, then:
 
 1. Reports progress and calls this launcher's fixed `-EnsureExasolOnly` mode, which reuses the Exakit status
    and safe-start logic above. A stopped runtime is started; an `interrupted` runtime is reported as needing
    manual attention. The helper never calls `exakit repair-runtime`.
 2. Imports `ngrok_render_sync.py` and reuses its `RunLock`, tunnel discovery, single-variable Render update,
-   idempotency/deploy reconciliation, deployment polling, and `/api/datasets/status` query verification.
+   idempotency/deploy reconciliation, deployment polling, and `/api/db/start/verify` query verification.
 3. Reports `requested → starting_exasol → starting_tunnel → updating_render → deploying → verifying → done`
    (or `failed`). If `EXASOL_DSN` already matches, a Render deployment is skipped and progress says so.
 
@@ -130,7 +130,9 @@ backend process can reconstruct current progress. Helper logs are written to
 
 On Render, set a long random `HELPER_TOKEN`. Keep the same value in
 `tools\ngrok_render_sync\local.env` with `BACKEND_URL`, `RENDER_API_KEY`, and `RENDER_SERVICE_ID`.
-`ADPILOT_CORS_ORIGINS` should retain any existing origins. No token is put in the browser bundle.
+`ADPILOT_CORS_ORIGINS` should retain any existing origins. No token is put in the browser bundle. Starting
+Exasol does not disable CSV demo mode; set `ADPILOT_DEMO_MODE=0` separately when the dashboard should use
+the live dataset.
 
 Generate a random token locally with:
 
@@ -165,8 +167,8 @@ From the repository root, after configuring `local.env`:
 The task is named **D2C Exasol helper**, runs for the logged-in Windows user, and restarts on failure. It
 appends logs to `tools\db_helper\.state\helper-YYYYMM.log`. For local UI/API testing, use
 `BACKEND_URL=http://127.0.0.1:8000` and the same test `HELPER_TOKEN` in both the helper environment and local
-backend environment, with `ADPILOT_DEMO_MODE=0`. The mocked test suite does not contact Render, ngrok, or
-Exasol:
+backend environment. Set `ADPILOT_DEMO_MODE=1` to show the button in the CSV demo UI. The mocked test suite
+does not contact Render, ngrok, or Exasol:
 
 ```powershell
 ..\.venv\Scripts\python.exe -m pytest backend\tests tools\ngrok_render_sync\tests
