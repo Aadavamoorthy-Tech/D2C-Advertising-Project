@@ -509,7 +509,58 @@ def test_helper_report_reconstructs_progress_after_backend_state_reset(helper_ap
     assert client.get("/api/db/start/status").json()["step"] == "deploying"
 
 
-def test_db_start_endpoints_are_not_applicable_in_demo_mode(helper_api, monkeypatch):
+def test_database_start_workflow_is_available_in_demo_mode(helper_api, monkeypatch):
     monkeypatch.setattr(app_module, "DEMO_MODE", True)
-    assert client.post("/api/db/start").status_code == 404
-    assert client.get("/api/db/start/status").status_code == 404
+    started = client.post("/api/db/start")
+    assert started.status_code == 202
+    assert started.json()["state"] == "running"
+    assert client.get("/api/db/start/status").status_code == 200
+    assert client.get(
+        "/api/helper/poll",
+        headers={"Authorization": "Bearer test-helper-token"},
+    ).json() == {"action": "start", "job_id": started.json()["job_id"]}
+
+
+def test_demo_start_still_queues_helper_when_exasol_is_already_reachable(helper_api, monkeypatch):
+    monkeypatch.setattr(app_module, "DEMO_MODE", True)
+    monkeypatch.setattr(app_module, "_exasol_is_reachable", lambda: True)
+
+    status = client.get("/api/db/start/status")
+    assert status.json()["state"] == "idle"
+
+    started = client.post("/api/db/start")
+    assert started.status_code == 202
+    assert started.json()["state"] == "running"
+    assert client.get(
+        "/api/helper/poll",
+        headers={"Authorization": "Bearer test-helper-token"},
+    ).json() == {"action": "start", "job_id": started.json()["job_id"]}
+
+
+def test_database_start_verification_refuses_demo_mode(helper_api, monkeypatch):
+    monkeypatch.setattr(app_module, "DEMO_MODE", True)
+
+    response = client.get("/api/db/start/verify")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "demo_mode"
+    assert response.json()["mode"] == "demo"
+
+
+def test_database_start_verification_loads_and_caches_live_dataset(helper_api, monkeypatch):
+    monkeypatch.setattr(app_module, "DEMO_MODE", False)
+    frame = pd.read_csv(app_module.DEFAULT_CSV, parse_dates=["date"]).iloc[:42].copy()
+    monkeypatch.setattr(app_module, "fetch_exasol_frame", lambda: frame)
+    app_module.clear_frame_cache()
+
+    response = client.get("/api/db/start/verify")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "row_count": 42,
+        "source": "Exasol",
+        "mode": "live",
+    }
+    assert app_module.load_frame()[1] == "exasol"
+    assert len(app_module.load_frame()[0]) == 42
