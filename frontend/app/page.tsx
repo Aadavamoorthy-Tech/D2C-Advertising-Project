@@ -8,6 +8,8 @@ import {
   Sparkles, Sun, Target, TrendingUp, TriangleAlert, Upload, X,
 } from 'lucide-react';
 import BudgetOptimizer from './BudgetOptimizer';
+import SettingsPage from './SettingsPage';
+import { DEFAULT_SETTINGS, Settings, applyFormat, formatDateTime, loadSettings, persistSettings, withCurrency } from './settings';
 
 const API = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 
@@ -57,7 +59,7 @@ function ActionCard({ item, onGo }: { item: ActionItem; onGo: (target: Section) 
 
 function money(value: number | null | undefined, digits = 0) {
   if (value == null || !Number.isFinite(Number(value))) return 'Unavailable';
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: digits, notation: 'compact' }).format(Number(value));
+  return withCurrency(new Intl.NumberFormat('en-US', { maximumFractionDigits: digits, notation: 'compact' }).format(Number(value)));
 }
 function number(value: number | null | undefined, digits = 0) {
   if (value == null || !Number.isFinite(Number(value))) return 'Unavailable';
@@ -83,7 +85,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 function fullNumber(value: number | null | undefined, digits = 0) {
   if (value == null || !Number.isFinite(Number(value))) return '—';
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: digits }).format(Number(value));
+  return withCurrency(new Intl.NumberFormat('en-US', { maximumFractionDigits: digits }).format(Number(value)));
 }
 function roasText(value: number | null | undefined) {
   return value == null || !Number.isFinite(Number(value)) ? '—' : `${Number(value).toFixed(2)}x`;
@@ -183,7 +185,17 @@ export default function Home() {
   const [rollbackReason, setRollbackReason] = useState('');
   const [rollbackNote, setRollbackNote] = useState('');
   const [rollbackError, setRollbackError] = useState('');
-  const [light, setLight] = useState(false);
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [systemDark, setSystemDark] = useState(true);
+  const [channelDefaultApplied, setChannelDefaultApplied] = useState(false);
+  applyFormat(settings);
+  const light = settings.theme === 'light' || (settings.theme === 'system' && !systemDark);
+
+  function updateSettings(next: Settings) {
+    setSettings(next);
+    persistSettings(next);
+  }
 
   const dateRange = useMemo(() => {
     if (!days) return { from: '', to: '' };
@@ -262,7 +274,29 @@ export default function Home() {
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => { if (section === 'campaigns' || section === 'opportunities' || section === 'overview' || section === 'optimizer') void loadCampaigns(); }, [section, loadCampaigns]);
   useEffect(() => { if (section === 'decisions' || section === 'execution' || section === 'overview') void loadDecisions(); }, [section, loadDecisions]);
-  useEffect(() => { document.body.dataset.theme = light ? 'light' : 'dark'; }, [light]);
+  useEffect(() => {
+    const saved = loadSettings();
+    setSettings(saved);
+    setSection(saved.landing as Section);
+    setDays(saved.period);
+    setTrendMetric(saved.metric);
+    setSettingsReady(true);
+    const query = window.matchMedia('(prefers-color-scheme: dark)');
+    setSystemDark(query.matches);
+    const listener = (event: MediaQueryListEvent) => setSystemDark(event.matches);
+    query.addEventListener('change', listener);
+    return () => query.removeEventListener('change', listener);
+  }, []);
+  useEffect(() => {
+    if (!settingsReady || channelDefaultApplied || !channels.length) return;
+    setChannelDefaultApplied(true);
+    if (settings.channel && channels.includes(settings.channel)) setChannel(settings.channel);
+  }, [channels, settings.channel, settingsReady, channelDefaultApplied]);
+  useEffect(() => {
+    document.body.dataset.theme = light ? 'light' : 'dark';
+    document.body.dataset.sidebar = settings.sidebar;
+    document.body.dataset.density = settings.density;
+  }, [light, settings.sidebar, settings.density]);
 
   async function uploadCsv(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -303,6 +337,7 @@ export default function Home() {
   }
 
   async function changeDecision(id: string, action: 'approve' | 'reject' | 'simulate') {
+    if (action !== 'reject' && settings.confirmApply && !window.confirm(action === 'approve' ? 'Approve this item for review?' : 'Mark this investigation as simulated? No ad account is changed.')) return;
     const reason = action === 'reject' ? window.prompt('Why are you rejecting this investigation item?') : '';
     if (action === 'reject' && !reason?.trim()) return;
     setBusy(true);
@@ -322,26 +357,32 @@ export default function Home() {
   }
 
   function openRollback(item: Payload) {
+    if (!settings.confirmRollback) {
+      void confirmRollback(item, 'Other', 'Rolled back without confirmation (setting turned off)');
+      return;
+    }
     setRollbackTarget(item);
     setRollbackReason('');
     setRollbackNote('');
     setRollbackError('');
   }
 
-  async function confirmRollback() {
-    if (!rollbackTarget || !rollbackReason) return;
+  async function confirmRollback(target: Payload | null = rollbackTarget, reason = rollbackReason, note = rollbackNote) {
+    if (!target || !reason) return;
     setBusy(true);
     setRollbackError('');
+    setError('');
     try {
-      await request<Payload>(`/api/recommendations/${rollbackTarget.id}/rollback`, {
+      await request<Payload>(`/api/recommendations/${target.id}/rollback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: rollbackReason, note: rollbackNote }),
+        body: JSON.stringify({ reason, note }),
       });
       setRollbackTarget(null);
       await loadDecisions();
     } catch (err) {
-      setRollbackError(err instanceof Error ? err.message : 'The rollback could not be completed.');
+      const text = err instanceof Error ? err.message : 'The rollback could not be completed.';
+      if (rollbackTarget) setRollbackError(text); else setError(`Rollback Failed: ${text}`);
     } finally {
       setBusy(false);
     }
@@ -474,7 +515,7 @@ export default function Home() {
     : 'Not checked';
 
   const goTo = (target: Section) => { setSection(target); setError(''); };
-  const clock = (value: Date) => value.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const clock = (value: Date) => formatDateTime(value);
   const pendingDecisions: Payload[] = recommendations.filter((item) => item.status === 'proposed');
   const trendDays: Payload[] = overview?.trend || [];
   const lastDay = trendDays.length ? new Date(trendDays[trendDays.length - 1].date).getTime() : null;
@@ -498,6 +539,7 @@ export default function Home() {
   const roasDropPriority: Priority = roasChange && roasChange.pct <= -25 ? 'High' : 'Medium';
 
   const attentionItems: ActionItem[] = [];
+  const attentionHidden = (key: string) => (!settings.alerts.performance && (key === 'roas' || key === 'profit')) || (!settings.alerts.anomaly && key === 'anomaly') || (!settings.alerts.decision && key === 'decisions');
   if (roasChange && roasChange.pct <= -10) attentionItems.push({ key: 'roas', category: 'Performance Warning', title: 'ROAS decline detected', text: 'Possible issue: ROAS is lower than in the previous 30 days of data.', metric: roasMetric, priority: roasDropPriority, target: 'campaigns', cta: 'Investigate' });
   if (metrics && Number(metrics.return_adjusted_net_profit) < 0) attentionItems.push({ key: 'profit', category: 'Performance Warning', title: 'Adjusted profit is negative', text: 'Return-adjusted profit is below zero for the selected period.', metric: `Adjusted Profit ${fullNumber(metrics.return_adjusted_net_profit)}`, priority: 'High', target: 'campaigns', cta: 'View Performance' });
   if (radar?.gaps.length) attentionItems.push({ key: 'gaps', category: 'Budget Issue', title: `${radar.gaps.length} campaigns well below blended ROAS`, text: 'Possible budget inefficiency among campaigns with above-median spend.', metric: `Lowest: ${radar.gaps[0].campaign_id} at ${roasText(radar.gaps[0].roas)}`, priority: 'Medium', target: 'optimizer', cta: 'Review Budget' });
@@ -505,6 +547,7 @@ export default function Home() {
   if (dataWarning) attentionItems.push({ key: 'data', category: 'Data Warning', title: 'Data quality issue detected', text: 'Some records need review before relying on the numbers.', priority: Number(duplicateRecordCount) > 0 ? 'Medium' : 'Low', target: 'data', cta: 'View Details' });
   if (radar?.unusual.length) attentionItems.push({ key: 'anomaly', category: 'Anomaly', title: `${radar.unusual.length} unusual revenue ${radar.unusual.length === 1 ? 'day' : 'days'}`, text: 'Revenue differed sharply from the daily average. Cause not determined.', priority: 'Low', target: 'insights', cta: 'Review Anomalies' });
   attentionItems.sort((a, b) => priorityRank[a.priority ?? 'Low'] - priorityRank[b.priority ?? 'Low']);
+  const visibleAttention = attentionItems.filter((item) => !attentionHidden(item.key));
 
   const decisionItems: ActionItem[] = pendingDecisions.slice(0, 3).map((item) => ({
     key: item.id, category: 'Awaiting Review', title: item.title,
@@ -527,6 +570,7 @@ export default function Home() {
   if (dataWarning && lastUpdated) alertItems.push({ key: 'data', time: clock(lastUpdated), type: 'Data Warning', text: 'Data quality issue detected.', severity: 'Low', target: 'data' });
   if (!loading && health?.status !== 'ok' && lastUpdated) alertItems.push({ key: 'sync', time: clock(lastUpdated), type: 'Sync Issue', text: 'The data source is not responding.', severity: 'Medium', target: 'data' });
   alertItems.sort((a, b) => priorityRank[a.severity] - priorityRank[b.severity]);
+  const visibleAlerts = alertItems.filter((alert) => !(alert.type === 'Performance Alert' && !settings.alerts.performance) && !(alert.type === 'Anomaly Detected' && !settings.alerts.anomaly));
 
   const activityLabels: Record<string, string> = { approved: 'Decision approved', rejected: 'Decision rejected', simulated: 'Investigation simulated', rolled_back: 'Simulation rolled back' };
   const decisionStatusLabels: Record<string, string> = { proposed: 'Pending', approved: 'Approved', rejected: 'Rejected', simulated: 'Simulated', rolled_back: 'Rolled Back' };
@@ -541,7 +585,7 @@ export default function Home() {
   if (pendingDecisions.length) briefItems.push({ key: 'brief-decision', category: 'Decision Pending', title: `${pendingDecisions.length} ${pendingDecisions.length === 1 ? 'recommendation is' : 'recommendations are'} waiting for review`, text: pendingDecisions[0].title, priority: 'Medium', target: 'decisions', cta: 'Review Decision' });
   if (radar?.realloc) briefItems.push({ key: 'brief-budget', category: 'Budget', title: `ROAS differs across channels`, text: `${radar.realloc.to.channel} is highest and ${radar.realloc.from.channel} is lowest.`, metric: `ROAS ${roasText(radar.realloc.to.roas)} vs ${roasText(radar.realloc.from.roas)}`, target: 'optimizer', cta: 'Review Budget' });
   if (dataWarning) briefItems.push({ key: 'brief-data', category: 'Data Warning', title: 'Data quality issue detected', text: 'Some records need review.', priority: 'Low', target: 'data', cta: 'View Details' });
-  const brief = briefItems.slice(0, 5);
+  const brief = briefItems.filter((item) => !(item.key === 'roas' && !settings.alerts.performance) && !(item.key === 'brief-decision' && !settings.alerts.decision)).slice(0, 5);
 
   const healthRows: { label: string; value: string; tone: string }[] = [
     { label: 'Data Source', value: loading ? 'Checking' : health?.status === 'ok' ? 'Connected' : 'Offline', tone: loading ? 'neutral' : health?.status === 'ok' ? 'good' : 'warn' },
@@ -553,14 +597,14 @@ export default function Home() {
   return <div className="shell">
     <aside className="sidebar">
       <div className="brand-row"><div className="brand-mark"><Orbit size={18} /></div><b>ADPILOT</b><span className="beta">LAB</span></div>
-      <button className="brand-switch"><span className="avatar">L</span><span><b>Lumière Skin Co.</b><small>D2C workspace</small></span><ChevronDown size={14} /></button>
+      <button className="brand-switch"><span className="avatar">{settings.workspaceName.charAt(0).toUpperCase()}</span><span><b>{settings.workspaceName}</b><small>D2C workspace</small></span><ChevronDown size={14} /></button>
       <button className="quick-search" onClick={() => document.getElementById('campaign-search')?.focus()}><Search size={15} /><span>Quick search</span><kbd>⌘ K</kbd></button>
       <nav className="nav" aria-label="Dashboard sections">
         {['WORKSPACE', 'INTELLIGENCE', 'DECISIONING', 'GOVERNANCE', 'SYSTEM'].map((group) => <div className="nav-group" key={group}>
           <div className="nav-label">{group}</div>
           {navItems.filter((item) => item.group === group).map((item) => {
             const Icon = item.icon;
-            return <button key={item.id} className={`nav-link ${section === item.id ? 'active' : ''}`} onClick={() => { setSection(item.id); setError(''); }}><Icon size={16} /><span>{item.label}</span>{item.id === 'summary' && <i className="ai-dot" />}</button>;
+            return <button key={item.id} className={`nav-link ${section === item.id ? 'active' : ''}`} title={item.label} aria-label={item.label} onClick={() => { setSection(item.id); setError(''); }}><Icon size={16} /><span>{item.label}</span>{item.id === 'summary' && <i className="ai-dot" />}</button>;
           })}
         </div>)}
       </nav>
@@ -571,14 +615,14 @@ export default function Home() {
         <div className="topbar-actions">
           {section !== 'campaigns' && <><label className="select-group"><small>Period</small><select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={0}>All time</option><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option><option value={365}>Last 12 months</option></select></label>
           <label className="select-group"><small>Channel</small><select value={channel} onChange={(event) => setChannel(event.target.value)}><option value="">All channels</option>{channels.map((name) => <option key={name} value={name}>{name}</option>)}</select></label></>}
-          <button className="icon-button" title={light ? 'Switch to dark theme' : 'Switch to light theme'} onClick={() => setLight(!light)}>{light ? <Moon size={16} /> : <Sun size={16} />}</button>
+          <button className="icon-button" title={light ? 'Switch to dark theme' : 'Switch to light theme'} onClick={() => updateSettings({ ...settings, theme: light ? 'dark' : 'light' })}>{light ? <Moon size={16} /> : <Sun size={16} />}</button>
           {section === 'campaigns' ? null : section === 'data' ? <button className="icon-button data-refresh" onClick={() => void refresh()} disabled={loading} title="Refresh Data" aria-label="Refresh Data"><RefreshCw size={14} className={loading ? 'spin' : ''} /></button> : <div className="data-status" aria-label="Data source status">
             <span className="data-status-source">
               <span className={`health-dot ${loading ? 'checking' : health?.status === 'ok' ? '' : 'offline'}`} />
               Data source: <strong>{sourceLabel}</strong>
               <span className={`data-status-state ${sourceStatus.toLowerCase()}`}>{sourceStatus}</span>
             </span>
-            <span className="data-status-time">Last updated: {lastUpdated ? lastUpdated.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</span>
+            <span className="data-status-time">Last updated:             {formatDateTime(lastUpdated)}</span>
             <button className="icon-button data-refresh" onClick={() => void refresh()} disabled={loading} title="Refresh data" aria-label="Refresh data">
               <RefreshCw size={14} className={loading ? 'spin' : ''} />
             </button>
@@ -593,25 +637,25 @@ export default function Home() {
         {section === 'overview' && <>
           <div className="page-heading"><div><h1>Action Center</h1><p>Review what needs attention, what requires a decision, and what action to take next.</p></div></div>
           <div className="ac-grid">
-            <section className="panel ac-panel ac-brief"><div className="panel-head"><div><h2>Today’s Brief</h2></div></div>
+            {settings.show.brief && <section className="panel ac-panel ac-brief"><div className="panel-head"><div><h2>Today’s Brief</h2></div></div>
               {loading ? <div className="state-card"><LoaderCircle className="spin" />Loading updates…</div> : brief.length ? <div className="ac-brief-grid">{brief.map((item) => <ActionCard key={item.key} item={item} onGo={goTo} />)}</div> : <p className="ac-empty">No updates to report right now.</p>}
-            </section>
-            <section className="panel ac-panel ac-attention"><div className="panel-head"><div><h2>Needs Attention</h2></div>{attentionItems.length > 0 && <span className="mini-tag">{attentionItems.length}</span>}</div>
-              {attentionItems.length ? attentionItems.map((item) => <ActionCard key={item.key} item={item} onGo={goTo} />) : <p className="ac-empty">Nothing needs attention right now.</p>}
-            </section>
-            <section className="panel ac-panel ac-decisions"><div className="panel-head"><div><h2>Pending Decisions</h2></div>{pendingDecisions.length > 0 && <span className="mini-tag">{pendingDecisions.length}</span>}</div>
+            </section>}
+            {settings.show.attention && <section className="panel ac-panel ac-attention"><div className="panel-head"><div><h2>Needs Attention</h2></div>{visibleAttention.length > 0 && <span className="mini-tag">{visibleAttention.length}</span>}</div>
+              {visibleAttention.length ? visibleAttention.map((item) => <ActionCard key={item.key} item={item} onGo={goTo} />) : <p className="ac-empty">Nothing needs attention right now.</p>}
+            </section>}
+            {settings.show.decisions && <section className="panel ac-panel ac-decisions"><div className="panel-head"><div><h2>Pending Decisions</h2></div>{pendingDecisions.length > 0 && <span className="mini-tag">{pendingDecisions.length}</span>}</div>
               {decisionItems.length ? decisionItems.map((item) => <ActionCard key={item.key} item={item} onGo={goTo} />) : <p className="ac-empty">No decisions are waiting for review.</p>}
               {pendingDecisions.length > decisionItems.length && <button type="button" className="ac-more" onClick={() => goTo('decisions')}>View all {pendingDecisions.length} decisions <ArrowRight size={12} /></button>}
-            </section>
-            <section className="panel ac-panel ac-opportunities"><div className="panel-head"><div><h2>Top Opportunities</h2></div></div>
+            </section>}
+            {settings.show.opportunities && <section className="panel ac-panel ac-opportunities"><div className="panel-head"><div><h2>Top Opportunities</h2></div></div>
               {opportunityItems.length ? opportunityItems.map((item) => <ActionCard key={item.key} item={item} onGo={goTo} />) : <p className="ac-empty">No opportunities identified for the current filters.</p>}
-            </section>
-            <section className="panel ac-panel ac-alerts"><div className="panel-head"><div><h2>Recent Alerts</h2></div></div>
-              {alertItems.length ? alertItems.slice(0, 5).map((alert) => <div className="ac-alert" key={alert.key}>
+            </section>}
+            {settings.show.alerts && <section className="panel ac-panel ac-alerts"><div className="panel-head"><div><h2>Recent Alerts</h2></div></div>
+              {visibleAlerts.length ? visibleAlerts.slice(0, 5).map((alert) => <div className="ac-alert" key={alert.key}>
                 <div className="ac-item-main"><div className="ac-item-meta"><span>{alert.time}</span><PriorityBadge level={alert.severity} /></div><b>{alert.type}</b><p>{alert.text}</p></div>
                 <button type="button" className="ac-link" onClick={() => goTo(alert.target)}>View Details <ArrowRight size={12} /></button>
               </div>) : <p className="ac-empty">No recent alerts.</p>}
-            </section>
+            </section>}
             <section className="panel ac-panel ac-activity"><div className="panel-head"><div><h2>Recent Activity</h2></div><button type="button" className="ac-link" onClick={() => goTo('execution')}>View Audit <ArrowRight size={12} /></button></div>
               {activityItems.length ? activityItems.map((item) => <div className="ac-activity-row" key={item.key}><span><b>{item.label}</b>{item.detail && <small>{item.detail}</small>}</span><time>{item.time}</time></div>) : <p className="ac-empty">No recent activity.</p>}
             </section>
@@ -624,7 +668,7 @@ export default function Home() {
         </>}
 
         {section === 'campaigns' && <>
-          <div className="page-heading"><div><h1>Performance Explorer</h1><p>Analyze campaign performance across time, channels and campaigns.</p></div><div className="explorer-meta"><span>Last updated: {lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</span><button className="secondary-button" onClick={() => void exportCampaigns()} disabled={!visibleCampaigns.length}><ArrowDownToLine size={15} /> Export CSV</button></div></div>
+          <div className="page-heading"><div><h1>Performance Explorer</h1><p>Analyze campaign performance across time, channels and campaigns.</p></div><div className="explorer-meta"><span>Last updated: {formatDateTime(lastUpdated)}</span><button className="secondary-button" onClick={() => void exportCampaigns()} disabled={!visibleCampaigns.length}><ArrowDownToLine size={15} /> Export CSV</button></div></div>
           <div className="explorer-filters">
             <label><span>Period</span><select value={days} onChange={(event) => { setDays(Number(event.target.value)); setPage(1); }}>{Object.entries(periodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             <label><span>Channel</span><select value={channel} onChange={(event) => { setChannel(event.target.value); setPage(1); }}><option value="">All channels</option>{channels.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
@@ -657,7 +701,7 @@ export default function Home() {
                 return <tr key={item.channel}><td><b>{item.channel}</b></td>{bar('spend', fullNumber(item.spend))}{bar('revenue', fullNumber(item.attributed_revenue))}{bar('profit', fullNumber(item.return_adjusted_net_profit))}{bar('roas', roasText(item.roas))}</tr>;
               }) : <tr><td colSpan={5} className="table-empty">No channels for this filter.</td></tr>}</tbody></table></div>
           </section>
-          <section className="panel explorer-panel campaign-panel"><div className="panel-head"><div><h2>Campaign Performance</h2></div><span className="result-count">{fullNumber(visibleCampaigns.length)} campaigns</span></div>
+          <section className="panel explorer-panel campaign-panel"><div className="panel-head"><div><h2>Campaign Performance</h2></div><span className="result-count">{visibleCampaigns.length} campaigns</span></div>
             {(campaigns?.items?.length || 0) > campaignPageSize && <div className="toolbar"><label className="search-box"><Search size={15} /><input id="campaign-search" value={search} onChange={(event) => { setPage(1); setSearch(event.target.value); }} placeholder="Search campaigns" /></label></div>}
             {campaigns ? <div className="table-scroll"><table className="explorer-table"><thead><tr><SortHead label="Campaign" field="name" sort={campaignSort} onSort={toggleSort(setCampaignSort)} /><th>Channel</th><SortHead label="Spend" field="spend" sort={campaignSort} onSort={toggleSort(setCampaignSort)} /><SortHead label="Revenue" field="revenue" sort={campaignSort} onSort={toggleSort(setCampaignSort)} info={metricHelp.revenue} /><SortHead label="Adjusted Profit" field="profit" sort={campaignSort} onSort={toggleSort(setCampaignSort)} info={metricHelp.profit} /><SortHead label="ROAS" field="roas" sort={campaignSort} onSort={toggleSort(setCampaignSort)} info={metricHelp.roas} /></tr></thead>
               <tbody>{pagedCampaigns.length ? pagedCampaigns.map((row: Payload) => <tr key={`${row.campaign_id}-${row.sku_id}-${row.ad_platform}`}><td><b>{row.campaign_id}</b><small>{row.sku_id}</small></td><td>{row.channel}</td><td className="num">{fullNumber(row.spend)}</td><td className="num">{fullNumber(row.attributed_revenue)}</td><td className="num">{fullNumber(row.return_adjusted_net_profit)}</td><td className="num">{roasText(row.roas)}</td></tr>) : <tr><td colSpan={6} className="table-empty">No campaigns for this filter.</td></tr>}</tbody></table></div> : <div className="state-card"><LoaderCircle className="spin" />Loading campaigns…</div>}
@@ -682,7 +726,7 @@ export default function Home() {
             <div className="data-source-grid">
               <div><span>Source</span><strong>{dataSourceName}</strong></div>
               <div><span>Status</span><strong className={connectionStatus === 'Connected' ? 'data-value-healthy' : 'data-value-warning'}>{connectionStatus}</strong></div>
-              <div><span>Last Updated</span><strong>{dataUpdatedAt ? dataUpdatedAt.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</strong></div>
+              <div><span>Last Updated</span><strong>{dataUpdatedAt ? formatDateTime(dataUpdatedAt, true) : '—'}</strong></div>
               <div><span>Total Records</span><strong>{dataset?.row_count == null ? 'Not available' : number(dataset.row_count)}</strong></div>
             </div>
           </section>
@@ -754,9 +798,9 @@ export default function Home() {
               </div>
             </div></div>;
           })()}</>}
-        {section === 'execution' && <><div className="page-heading"><div><div className="eyebrow">AUDIT TRAIL</div><h1>Decision history</h1><p>Recorded approvals, rejections, and simulation states. No live advertising execution is available.</p></div></div><section className="panel"><div className="panel-head"><div><h2>Review events</h2><p>Persistent local decision metadata</p></div></div>{history.length ? history.map((event, index) => <div className="quality-row" key={`${event.decision_id}-${event.created_at}-${index}`}><span><b>{event.target}</b><small>{new Date(event.created_at).toLocaleString()} · {event.reason || 'No note'}</small></span><span className="status-tag green">{decisionStatusLabels[event.status] || event.status}</span></div>) : <Empty text="Review decisions will appear here." />}</section>{audit.length > 0 && <section className="panel"><div className="panel-head"><div><h2>Simulation rollback audit</h2><p>Separate record of each rollback</p></div></div>{audit.map((entry, index) => <div className="quality-row" key={`${entry.decision_id}-${index}`}><span><b>{entry.target}</b><small>Decision {String(entry.decision_id).slice(0, 10)} · restored {decisionStatusLabels[entry.previous_state] || entry.previous_state} from {decisionStatusLabels[entry.rolled_back_state] || entry.rolled_back_state} · {entry.reason} · {entry.performed_by} · {new Date(entry.created_at).toLocaleString()}</small></span><span className="status-tag neutral">Rolled Back</span></div>)}</section>}</>}
+        {section === 'execution' && <><div className="page-heading"><div><div className="eyebrow">AUDIT TRAIL</div><h1>Decision history</h1><p>Recorded approvals, rejections, and simulation states. No live advertising execution is available.</p></div></div><section className="panel"><div className="panel-head"><div><h2>Review events</h2><p>Persistent local decision metadata</p></div></div>{history.length ? history.map((event, index) => <div className="quality-row" key={`${event.decision_id}-${event.created_at}-${index}`}><span><b>{event.target}</b><small>{formatDateTime(event.created_at, true)} · {event.reason || 'No note'}</small></span><span className="status-tag green">{decisionStatusLabels[event.status] || event.status}</span></div>) : <Empty text="Review decisions will appear here." />}</section>{audit.length > 0 && <section className="panel"><div className="panel-head"><div><h2>Simulation rollback audit</h2><p>Separate record of each rollback</p></div></div>{audit.map((entry, index) => <div className="quality-row" key={`${entry.decision_id}-${index}`}><span><b>{entry.target}</b><small>Decision {String(entry.decision_id).slice(0, 10)} · restored {decisionStatusLabels[entry.previous_state] || entry.previous_state} from {decisionStatusLabels[entry.rolled_back_state] || entry.rolled_back_state} · {entry.reason} · {entry.performed_by} · {formatDateTime(entry.created_at, true)}</small></span><span className="status-tag neutral">Rolled Back</span></div>)}</section>}</>}
         {section === 'opportunities' && <>
-          <div className="page-heading"><div><h1>Opportunity Radar</h1><p>Campaign opportunities and efficiency gaps found in the filtered data. Candidates are rule-based and for review only.</p></div><div className="explorer-meta"><span>Last updated: {lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</span></div></div>
+          <div className="page-heading"><div><h1>Opportunity Radar</h1><p>Campaign opportunities and efficiency gaps found in the filtered data. Candidates are rule-based and for review only.</p></div><div className="explorer-meta"><span>Last updated: {formatDateTime(lastUpdated)}</span></div></div>
           {!radar ? (loading || !campaigns ? <div className="state-card"><LoaderCircle className="spin" />Scanning for opportunities…</div> : <section className="panel"><Empty text="Opportunities appear once campaign data with spend and revenue is available." /></section>) : <>
             <div className="explorer-kpis">
               <div><span>Blended ROAS <Info text={metricHelp.roas} label="About ROAS" /></span><strong>{roasText(radar.blended)}</strong></div>
@@ -783,8 +827,9 @@ export default function Home() {
           </>}
         </>}
 
-        {section === 'optimizer' && <BudgetOptimizer campaigns={campaigns ? campaigns.items : null} onNavigate={(id) => goTo(id as Section)} />}
-        {!['overview', 'campaigns', 'opportunities', 'insights', 'data', 'summary', 'decisions', 'execution', 'optimizer'].includes(section) && <><div className="page-heading"><div><div className="eyebrow">ADPILOT WORKSPACE</div><h1>{navItems.find((item) => item.id === section)?.label}</h1><p>This screen is reserved for a future workflow; no unsupported analytics are shown.</p></div></div><section className="panel"><Empty text="This local MVP currently provides verified campaign metrics, rule-based investigation candidates, human review history, and AI-generated summaries. It does not generate budget allocations or execute live ad-account changes." /></section></>}
+        {section === 'optimizer' && <BudgetOptimizer campaigns={campaigns ? campaigns.items : null} onNavigate={(id) => goTo(id as Section)} defaultObjective={settings.objective} defaultMaxChange={settings.maxBudgetChange} />}
+        {section === 'settings' && <SettingsPage saved={settings} channels={channels} onSave={updateSettings} />}
+        {!['overview', 'campaigns', 'opportunities', 'insights', 'data', 'summary', 'decisions', 'execution', 'optimizer', 'settings'].includes(section) && <><div className="page-heading"><div><div className="eyebrow">ADPILOT WORKSPACE</div><h1>{navItems.find((item) => item.id === section)?.label}</h1><p>This screen is reserved for a future workflow; no unsupported analytics are shown.</p></div></div><section className="panel"><Empty text="This local MVP currently provides verified campaign metrics, rule-based investigation candidates, human review history, and AI-generated summaries. It does not generate budget allocations or execute live ad-account changes." /></section></>}
       </section>
     </main>
   </div>;

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowRight, ArrowUp, Info, Lock, Minus, RotateCcw, Save } from 'lucide-react';
+import { formatDateTime, withCurrency } from './settings';
 
 const API = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 
@@ -40,7 +41,7 @@ const objectiveLabel: Record<Objective, string> = { revenue: 'Maximize Revenue',
 
 function amount(value: number | null | undefined) {
   if (value == null || !Number.isFinite(value)) return '—';
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value);
+  return withCurrency(new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value));
 }
 function signedAmount(value: number) {
   const text = amount(Math.abs(value));
@@ -228,11 +229,11 @@ function Direction({ change }: { change: number }) {
     : <span className="bo-dir down"><ArrowDown size={12} aria-hidden /><span className="sr-only">Decrease </span>{signedAmount(change)}</span>;
 }
 
-export default function BudgetOptimizer({ campaigns, onNavigate }: { campaigns: CampaignRow[] | null; onNavigate: (section: string) => void }) {
+export default function BudgetOptimizer({ campaigns, onNavigate, defaultObjective = 'profit', defaultMaxChange = 20 }: { campaigns: CampaignRow[] | null; onNavigate: (section: string) => void; defaultObjective?: Objective; defaultMaxChange?: number }) {
   const [level, setLevel] = useState<Level>('channel');
-  const [objective, setObjective] = useState<Objective>('profit');
+  const [objective, setObjective] = useState<Objective>(defaultObjective);
   const [budgetText, setBudgetText] = useState('');
-  const [maxPctText, setMaxPctText] = useState('20');
+  const [maxPctText, setMaxPctText] = useState(String(defaultMaxChange));
   const [constraints, setConstraints] = useState<Record<string, Constraint>>({});
   const [result, setResult] = useState<Result | null>(null);
   const [name, setName] = useState('');
@@ -271,7 +272,7 @@ export default function BudgetOptimizer({ campaigns, onNavigate }: { campaigns: 
     setResult(optimize(units, { objective, level, budgetText, maxPctText, constraints }, signature));
   }
   function reset() {
-    setLevel('channel'); setObjective('profit'); setBudgetText(''); setMaxPctText('20');
+    setLevel('channel'); setObjective(defaultObjective); setBudgetText(''); setMaxPctText(String(defaultMaxChange));
     setConstraints({}); setResult(null); setName(''); setSaved(null); setNote(null);
   }
 
@@ -417,7 +418,7 @@ export default function BudgetOptimizer({ campaigns, onNavigate }: { campaigns: 
       </div>
       {!good && <p className="bo-hint">Run the optimization first. Results must be current to save or send.</p>}
       {note && <div className={note.tone === 'error' ? 'bo-alert' : 'bo-ok'} role={note.tone === 'error' ? 'alert' : 'status'}><b>{note.title}</b><span>{note.text}</span>{note.tone === 'ok' && note.title.startsWith('Sent') && <button type="button" className="bo-link" onClick={() => onNavigate('decisions')}>Open Decision Center <ArrowRight size={12} aria-hidden /></button>}</div>}
-      {scenarios.length > 0 && <div className="bo-saved"><h3>Saved Scenarios</h3>{scenarios.slice(0, 5).map((scenario) => <div key={scenario.id}><span><b>{scenario.name}</b><small>{objectiveLabel[scenario.objective as Objective] || scenario.objective} · budget {amount(scenario.total_budget)} · {new Date(scenario.created_at).toLocaleString()}</small></span><span className="bo-tag">{scenario.sent ? 'Sent for review' : 'Saved'}</span></div>)}</div>}
+      {scenarios.length > 0 && <div className="bo-saved"><h3>Saved Scenarios</h3>{scenarios.slice(0, 5).map((scenario) => <div key={scenario.id}><span><b>{scenario.name}</b><small>{objectiveLabel[scenario.objective as Objective] || scenario.objective} · budget {amount(scenario.total_budget)} · {formatDateTime(scenario.created_at, true)}</small></span><span className="bo-tag">{scenario.sent ? 'Sent for review' : 'Saved'}</span></div>)}</div>}
     </section>
 
     {showMethod && <div className="rb-overlay" role="presentation" onClick={() => setShowMethod(false)}><div className="rb-modal" role="dialog" aria-modal="true" aria-labelledby="bo-method" onClick={(event) => event.stopPropagation()}>
