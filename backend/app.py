@@ -13,7 +13,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 from urllib.error import HTTPError, URLError
 
 import pandas as pd
@@ -129,6 +129,18 @@ class RollbackRequest(BaseModel):
     reason: str = Field(max_length=200)
     note: str = Field(default="", max_length=1000)
     performed_by: str = Field(default="", max_length=100)
+
+
+class BudgetScenarioRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    objective: Literal["revenue", "profit"]
+    level: Literal["channel", "campaign"]
+    total_budget: float = Field(ge=0, le=1e12)
+    max_change_pct: float = Field(ge=0, le=100)
+    constraints: list[dict[str, Any]] = Field(default_factory=list, max_length=500)
+    allocation: list[dict[str, Any]] = Field(max_length=500)
+    impact: dict[str, Any] = Field(default_factory=dict)
+    send: bool = False
 
 
 def exasol_password() -> str:
@@ -421,6 +433,17 @@ def decision_db() -> sqlite3.Connection:
             rolled_back_state TEXT NOT NULL,
             reason TEXT NOT NULL,
             performed_by TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS budget_scenarios (
+            scenario_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            decision_id TEXT,
             created_at TEXT NOT NULL
         )
         """
@@ -893,7 +916,128 @@ def recommendations() -> dict[str, Any]:
                 item["reason"] = state["reason"]
                 if state["status"] in {"simulated", "rejected"}:
                     item["rollback"] = rollback_context(db, item["id"], state["status"])
+        for state in states.values():
+            if not state["target"].startswith("budget-scenario|"):
+                continue
+            evidence = json.loads(state["evidence_json"])
+            item = {
+                "id": state["decision_id"],
+                "dataset_id": state["dataset_id"],
+                "campaign_id": "",
+                "sku_id": "",
+                "channel": "Budget Optimizer",
+                "ad_platform": "Simulation",
+                "action_type": "budget-reallocation",
+                "title": f"Budget reallocation simulation: {evidence.get('name', 'Untitled')}",
+                "status": state["status"],
+                "reason": state["reason"],
+                "evidence": evidence,
+            }
+            if state["status"] in {"simulated", "rejected"}:
+                item["rollback"] = rollback_context(db, item["id"], state["status"])
+            candidates.append(item)
     return {"source": source, "items": candidates}
+
+
+def validate_budget_scenario(body: BudgetScenarioRequest) -> None:
+    total = 0.0
+    for row in body.allocation:
+        try:
+            recommended = float(row.get("recommended"))
+            current = float(row.get("current"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Allocation rows need numeric budgets.")
+        if not (0 <= recommended < 1e13) or not (0 <= current < 1e13):
+            raise HTTPException(status_code=422, detail="Budgets must be non-negative.")
+        total += recommended
+    if total > body.total_budget + 0.5:
+        raise HTTPException(
+            status_code=422,
+            detail="Recommended allocation exceeds the simulation budget.",
+        )
+
+
+def send_scenario_to_decisions(db: sqlite3.Connection, scenario_id: str, payload: dict[str, Any]) -> str:
+    decision_id = uuid.uuid4().hex
+    allocation = payload["allocation"]
+    impact = payload.get("impact", {})
+    evidence = {
+        "name": payload["name"],
+        "record_count": sum(1 for row in allocation if abs(float(row.get("change", 0))) > 0),
+        "return_adjusted_net_profit": impact.get("current_profit"),
+        "rule_id": "budget-optimizer-simulation",
+        "rule_version": "1",
+        "scenario_id": scenario_id,
+        "objective": payload["objective"],
+        "budget_moved": impact.get("budget_moved"),
+        "limitation": "Simulation based on historical rates; no advertising account is changed.",
+    }
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        """
+        INSERT INTO decisions (decision_id, dataset_id, target, evidence_json, status, updated_at)
+        VALUES (?, 'budget-optimizer', ?, ?, 'proposed', ?)
+        """,
+        (decision_id, f"budget-scenario|{scenario_id}", json.dumps(evidence), now),
+    )
+    db.execute("UPDATE budget_scenarios SET decision_id = ? WHERE scenario_id = ?", (decision_id, scenario_id))
+    return decision_id
+
+
+@app.post("/api/budget-scenarios")
+def save_budget_scenario(body: BudgetScenarioRequest) -> dict[str, Any]:
+    validate_budget_scenario(body)
+    payload = body.model_dump()
+    send = payload.pop("send")
+    scenario_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    with decision_store() as db:
+        db.execute(
+            "INSERT INTO budget_scenarios (scenario_id, name, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            (scenario_id, body.name.strip(), json.dumps(payload), now),
+        )
+        decision_id = send_scenario_to_decisions(db, scenario_id, payload) if send else None
+        db.commit()
+    return {"id": scenario_id, "decision_id": decision_id, "created_at": now}
+
+
+@app.post("/api/budget-scenarios/{scenario_id}/send")
+def send_budget_scenario(scenario_id: str) -> dict[str, Any]:
+    if not scenario_id.isalnum():
+        raise HTTPException(status_code=422, detail="Invalid scenario identifier.")
+    with decision_store() as db:
+        row = db.execute(
+            "SELECT payload_json, decision_id FROM budget_scenarios WHERE scenario_id = ?",
+            (scenario_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Scenario was not found.")
+        if row["decision_id"]:
+            raise HTTPException(status_code=409, detail="This scenario was already sent to Decision Center.")
+        decision_id = send_scenario_to_decisions(db, scenario_id, json.loads(row["payload_json"]))
+        db.commit()
+    return {"id": scenario_id, "decision_id": decision_id}
+
+
+@app.get("/api/budget-scenarios")
+def list_budget_scenarios() -> dict[str, Any]:
+    with decision_db() as db:
+        rows = db.execute(
+            "SELECT scenario_id, name, payload_json, decision_id, created_at FROM budget_scenarios ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
+    items = []
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        items.append({
+            "id": row["scenario_id"],
+            "name": row["name"],
+            "objective": payload["objective"],
+            "level": payload["level"],
+            "total_budget": payload["total_budget"],
+            "created_at": row["created_at"],
+            "sent": bool(row["decision_id"]),
+        })
+    return {"items": items}
 
 
 @app.post("/api/recommendations/{decision_id}/rollback")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +12,7 @@ APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 SPEC = importlib.util.spec_from_file_location("adpilot_backend", APP_PATH)
 assert SPEC and SPEC.loader
 app_module = importlib.util.module_from_spec(SPEC)
+sys.modules["adpilot_backend"] = app_module
 SPEC.loader.exec_module(app_module)
 client = TestClient(app_module.app)
 
@@ -345,3 +347,29 @@ def test_decisions_require_approval_before_simulation_and_never_execute_live(mon
     assert audit[0]["previous_state"] == "approved" and audit[0]["performed_by"] == "Tester"
     history = client.get("/api/decision-history").json()["items"]
     assert [e["status"] for e in history].count("simulated") == 1
+
+
+def test_budget_scenarios_save_and_send_to_decision_center(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "ROOT", tmp_path)
+    monkeypatch.setattr(app_module, "load_frame", lambda *a, **k: (pd.DataFrame(), "test"))
+    monkeypatch.setattr(app_module, "recommendation_candidates", lambda frame: [])
+    body = {
+        "name": "Shift to Email", "objective": "profit", "level": "channel",
+        "total_budget": 100, "max_change_pct": 20, "constraints": [],
+        "allocation": [
+            {"key": "a", "current": 60, "recommended": 50, "change": -10},
+            {"key": "b", "current": 40, "recommended": 50, "change": 10},
+        ],
+        "impact": {"current_profit": 5, "budget_moved": 10},
+    }
+    assert client.post("/api/budget-scenarios", json={**body, "total_budget": 90}).status_code == 422
+    saved = client.post("/api/budget-scenarios", json=body)
+    assert saved.status_code == 200 and saved.json()["decision_id"] is None
+    assert client.get("/api/recommendations").json()["items"] == []
+    sent = client.post(f"/api/budget-scenarios/{saved.json()['id']}/send")
+    assert sent.status_code == 200
+    assert client.post(f"/api/budget-scenarios/{saved.json()['id']}/send").status_code == 409
+    items = client.get("/api/recommendations").json()["items"]
+    assert len(items) == 1 and items[0]["status"] == "proposed"
+    assert items[0]["title"].startswith("Budget reallocation simulation")
+    assert client.get("/api/budget-scenarios").json()["items"][0]["sent"] is True

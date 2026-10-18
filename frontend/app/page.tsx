@@ -7,6 +7,7 @@ import {
   Gauge, Layers3, LoaderCircle, Moon, Orbit, RefreshCw, Search, Settings2,
   Sparkles, Sun, Target, TrendingUp, TriangleAlert, Upload, X,
 } from 'lucide-react';
+import BudgetOptimizer from './BudgetOptimizer';
 
 const API = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 
@@ -259,7 +260,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
-  useEffect(() => { if (section === 'campaigns' || section === 'opportunities' || section === 'overview') void loadCampaigns(); }, [section, loadCampaigns]);
+  useEffect(() => { if (section === 'campaigns' || section === 'opportunities' || section === 'overview' || section === 'optimizer') void loadCampaigns(); }, [section, loadCampaigns]);
   useEffect(() => { if (section === 'decisions' || section === 'execution' || section === 'overview') void loadDecisions(); }, [section, loadDecisions]);
   useEffect(() => { document.body.dataset.theme = light ? 'light' : 'dark'; }, [light]);
 
@@ -782,7 +783,8 @@ export default function Home() {
           </>}
         </>}
 
-        {!['overview', 'campaigns', 'opportunities', 'insights', 'data', 'summary', 'decisions', 'execution'].includes(section) && <><div className="page-heading"><div><div className="eyebrow">ADPILOT WORKSPACE</div><h1>{navItems.find((item) => item.id === section)?.label}</h1><p>This screen is reserved for a future workflow; no unsupported analytics are shown.</p></div></div><section className="panel"><Empty text="This local MVP currently provides verified campaign metrics, rule-based investigation candidates, human review history, and AI-generated summaries. It does not generate budget allocations or execute live ad-account changes." /></section></>}
+        {section === 'optimizer' && <BudgetOptimizer campaigns={campaigns ? campaigns.items : null} onNavigate={(id) => goTo(id as Section)} />}
+        {!['overview', 'campaigns', 'opportunities', 'insights', 'data', 'summary', 'decisions', 'execution', 'optimizer'].includes(section) && <><div className="page-heading"><div><div className="eyebrow">ADPILOT WORKSPACE</div><h1>{navItems.find((item) => item.id === section)?.label}</h1><p>This screen is reserved for a future workflow; no unsupported analytics are shown.</p></div></div><section className="panel"><Empty text="This local MVP currently provides verified campaign metrics, rule-based investigation candidates, human review history, and AI-generated summaries. It does not generate budget allocations or execute live ad-account changes." /></section></>}
       </section>
     </main>
   </div>;
