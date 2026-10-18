@@ -734,7 +734,7 @@ export default function Home() {
                 <div><dt>Decision</dt><dd>{rollbackTarget.title}</dd></div>
                 <div><dt>Current state</dt><dd>Simulated (applied)</dd></div>
                 <div><dt>Previous state</dt><dd>{previousLabel}</dd></div>
-                <div><dt>After rollback</dt><dd>Status changes from Simulated to <b>Rolled Back</b>, restoring the exact earlier state: {previousLabel}. The original decision and its history are kept.</dd></div>
+                <div><dt>After rollback</dt><dd>The decision returns to <b>Pending</b>, so Approve review and Reject are available again. The rollback is recorded in history and the audit log; nothing is deleted.</dd></div>
               </dl>
               {ctx.conflict && <div className="rb-alert" role="alert"><b>Conflict</b><span>{ctx.conflict}</span></div>}
               <label className="rb-field">Rollback reason

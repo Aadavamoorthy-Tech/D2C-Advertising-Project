@@ -425,6 +425,7 @@ def decision_db() -> sqlite3.Connection:
         )
         """
     )
+    db.execute("UPDATE decisions SET status = 'proposed' WHERE status IN ('rejected', 'rolled_back')")
     db.commit()
     return db
 
@@ -920,7 +921,7 @@ def rollback_recommendation(decision_id: str, body: RollbackRequest) -> dict[str
             raise HTTPException(status_code=409, detail=context["conflict"])
         now = datetime.now(timezone.utc).isoformat()
         db.execute(
-            "UPDATE decisions SET status = 'rolled_back', reason = ?, updated_at = ? WHERE decision_id = ?",
+            "UPDATE decisions SET status = 'proposed', reason = ?, updated_at = ? WHERE decision_id = ?",
             (reason, now, decision_id),
         )
         db.execute(
@@ -938,8 +939,8 @@ def rollback_recommendation(decision_id: str, body: RollbackRequest) -> dict[str
         db.commit()
     return {
         "id": decision_id,
-        "status": "rolled_back",
-        "restored_state": context["previous_state"],
+        "status": "proposed",
+        "restored_state": "proposed",
         "updated_at": now,
         "message": "Simulation rollback recorded; no advertising account was changed.",
     }
@@ -990,9 +991,10 @@ def update_recommendation(
         if action == "reject" and not body.reason.strip():
             raise HTTPException(status_code=422, detail="A rejection reason is required.")
         now = datetime.now(timezone.utc).isoformat()
+        stored = "proposed" if action == "reject" else after
         db.execute(
             "UPDATE decisions SET status = ?, reason = ?, updated_at = ? WHERE decision_id = ?",
-            (after, body.reason.strip(), now, decision_id),
+            (stored, body.reason.strip(), now, decision_id),
         )
         db.execute(
             "INSERT INTO decision_events (decision_id, status, reason, created_at) VALUES (?, ?, ?, ?)",
@@ -1001,7 +1003,7 @@ def update_recommendation(
         db.commit()
     return {
         "id": decision_id,
-        "status": after,
+        "status": stored,
         "updated_at": now,
         "message": "Recorded as a review decision only; no advertising account was changed.",
     }

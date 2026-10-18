@@ -324,8 +324,8 @@ def test_decisions_require_approval_before_simulation_and_never_execute_live(mon
 
     done = client.post(path, json={"reason": "Performance worsened", "performed_by": "Tester"})
     assert done.status_code == 200
-    assert done.json()["status"] == "rolled_back"
-    assert done.json()["restored_state"] == "approved"
+    assert done.json()["status"] == "proposed"
+    assert done.json()["restored_state"] == "proposed"
     assert client.post(path, json={"reason": "Budget changed"}).status_code == 409
     audit = client.get("/api/rollback-audit").json()["items"]
     assert audit[0]["previous_state"] == "approved" and audit[0]["performed_by"] == "Tester"
