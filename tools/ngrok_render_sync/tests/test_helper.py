@@ -140,3 +140,56 @@ def test_polling_runs_and_reports_the_fixed_start_workflow(helper_instance):
         "requested", "starting_exasol", "starting_tunnel", "updating_render",
         "deploying", "verifying", "done",
     ]
+
+
+def test_start_workflow_switches_render_from_demo_to_live_and_verifies_it(
+    helper_instance, monkeypatch
+):
+    class FakeRender:
+        def __init__(self):
+            self.env = {
+                nrs.ENV_VAR_NAME: "old-host.example/ABCDEF:11111",
+                nrs.DEMO_MODE_ENV_VAR_NAME: "1",
+            }
+
+        def get_env(self, key):
+            return self.env.get(key)
+
+        def put_env(self, value, key):
+            self.env[key] = value
+
+    render = FakeRender()
+    monkeypatch.setattr(helper_instance, "_start_exasol", lambda: None)
+    monkeypatch.setattr(nrs, "require_render_config", lambda _cfg: None)
+    monkeypatch.setattr(nrs, "RenderClient", lambda _cfg: render)
+    monkeypatch.setattr(
+        nrs,
+        "ensure_tunnel",
+        lambda *_args: ("new-host.example:22222", "inspect", False),
+    )
+    deployments = []
+
+    def sync_once(*_args, force_deploy=False, **_kwargs):
+        deployments.append(force_deploy)
+        return nrs.SyncResult("updated", deploy_id="deploy-1")
+
+    monkeypatch.setattr(nrs, "sync_once", sync_once)
+    monkeypatch.setattr(nrs, "wait_for_deploy", lambda *_args, **_kwargs: "live")
+    verification = []
+
+    def verify_database_query(url, *, require_live_mode=False):
+        verification.append((url, require_live_mode))
+        return True, "live dataset"
+
+    monkeypatch.setattr(nrs, "verify_database_query", verify_database_query)
+
+    helper_instance._execute_sync("job-1")
+
+    assert render.env[nrs.DEMO_MODE_ENV_VAR_NAME] == "0"
+    assert deployments == [True]
+    assert verification == [
+        ("https://backend.example/api/db/start/verify", True)
+    ]
+    assert "live_mode_pending" not in nrs.StateStore(
+        helper_instance.cfg.state_dir / "state.json"
+    ).load()
