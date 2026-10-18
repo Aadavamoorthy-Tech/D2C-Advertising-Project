@@ -312,7 +312,7 @@ export default function Home() {
             <section className="panel source-panel data-health-panel"><div className="panel-head"><div><h2>Data Health</h2></div><Database size={17} /></div>
               <div className="data-health-content">
                 <strong className={`data-health-status ${dataHealthStatus.toLowerCase().replace(' ', '-')}`}>{dataHealthStatus}</strong>
-                <div className="data-health-detail"><span>Source</span><b>{overview?.source === 'exasol' || health?.mode === 'live' ? 'Exasol' : 'CSV fixture'}</b></div>
+                <div className="data-health-detail"><span>Source</span><b>{health?.mode === 'live' ? 'Exasol' : dataset?.status === 'ready' ? 'Uploaded CSV' : 'Demo Dataset'}</b></div>
                 <div className="data-health-detail"><span>Last updated</span><b>{lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</b></div>
                 <button type="button" className="data-health-link" onClick={() => { setSection('data'); setError(''); }}>View details <ArrowRight size={13} /></button>
               </div>
