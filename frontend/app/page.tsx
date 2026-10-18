@@ -177,6 +177,11 @@ export default function Home() {
   const [message, setMessage] = useState('');
   const [summary, setSummary] = useState<Payload | null>(null);
   const [decisionsReady, setDecisionsReady] = useState(false);
+  const [audit, setAudit] = useState<Payload[]>([]);
+  const [rollbackTarget, setRollbackTarget] = useState<Payload | null>(null);
+  const [rollbackReason, setRollbackReason] = useState('');
+  const [rollbackNote, setRollbackNote] = useState('');
+  const [rollbackError, setRollbackError] = useState('');
   const [light, setLight] = useState(false);
 
   const dateRange = useMemo(() => {
@@ -238,12 +243,14 @@ export default function Home() {
 
   const loadDecisions = useCallback(async () => {
     try {
-      const [recommendationData, historyData] = await Promise.all([
+      const [recommendationData, historyData, auditData] = await Promise.all([
         request<Payload>('/api/recommendations'),
         request<Payload>('/api/decision-history'),
+        request<Payload>('/api/rollback-audit'),
       ]);
       setRecommendations(recommendationData.items || []);
       setHistory(historyData.items || []);
+      setAudit(auditData.items || []);
       setDecisionsReady(true);
     } catch (err) {
       setDecisionsReady(false);
@@ -308,6 +315,32 @@ export default function Home() {
       await loadDecisions();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save review decision.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openRollback(item: Payload) {
+    setRollbackTarget(item);
+    setRollbackReason('');
+    setRollbackNote('');
+    setRollbackError('');
+  }
+
+  async function confirmRollback() {
+    if (!rollbackTarget || !rollbackReason) return;
+    setBusy(true);
+    setRollbackError('');
+    try {
+      await request<Payload>(`/api/recommendations/${rollbackTarget.id}/rollback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: rollbackReason, note: rollbackNote }),
+      });
+      setRollbackTarget(null);
+      await loadDecisions();
+    } catch (err) {
+      setRollbackError(err instanceof Error ? err.message : 'The rollback could not be completed.');
     } finally {
       setBusy(false);
     }
@@ -494,7 +527,8 @@ export default function Home() {
   if (!loading && health?.status !== 'ok' && lastUpdated) alertItems.push({ key: 'sync', time: clock(lastUpdated), type: 'Sync Issue', text: 'The data source is not responding.', severity: 'Medium', target: 'data' });
   alertItems.sort((a, b) => priorityRank[a.severity] - priorityRank[b.severity]);
 
-  const activityLabels: Record<string, string> = { approved: 'Decision approved', rejected: 'Decision rejected', simulated: 'Investigation simulated' };
+  const activityLabels: Record<string, string> = { approved: 'Decision approved', rejected: 'Decision rejected', simulated: 'Investigation simulated', rolled_back: 'Simulation rolled back' };
+  const decisionStatusLabels: Record<string, string> = { proposed: 'Pending', approved: 'Approved', rejected: 'Rejected', simulated: 'Simulated', rolled_back: 'Rolled Back' };
   const activityItems: { key: string; label: string; time: string; detail?: string }[] = [
     ...(lastUpdated ? [{ key: 'refresh', label: 'Dataset refreshed', time: clock(lastUpdated), detail: dataSourceName }] : []),
     ...history.slice(0, 4).map((event, index) => ({ key: `${event.decision_id}-${index}`, label: activityLabels[event.status] || 'Decision updated', time: clock(new Date(event.created_at)), detail: String(event.target || '').replace('|', ' / ') })),
@@ -689,9 +723,37 @@ export default function Home() {
           </section><div className="notice neutral"><CircleHelp size={15} /><span>When configured, Gemini receives campaign data required for summarization. Do not include confidential data unless your organization permits it. AI output is descriptive, not a validated numerical source of truth; the no-key fallback is not model-generated.</span></div></>}
         {section === 'decisions' && <><div className="page-heading"><div><div className="eyebrow">RULE-BASED REVIEW · NO SPEND CHANGES</div><h1>Decision center</h1><p>Review transparent investigation candidates generated from observed metrics.</p></div></div>
           <section className="panel"><div className="panel-head"><div><h2>Investigation candidates</h2><p>Rule: at least five records and negative return-adjusted profit for a campaign/SKU group.</p></div><span className="mini-tag">{recommendations.length} CANDIDATES</span></div>
-            {recommendations.length ? recommendations.map((item) => <div className="decision-row" key={item.id}><div className="decision-copy"><b>{item.title}</b><small>{item.channel} · {item.ad_platform} · {item.evidence.record_count} records</small><p>Observed return-adjusted profit: <strong>{money(item.evidence.return_adjusted_net_profit)}</strong>. This flags a review; it does not establish cause or estimate impact.</p><small>Rule {item.evidence.rule_id} · dataset {item.dataset_id.slice(0, 10)}</small></div><span className={`status-tag ${item.status === 'proposed' ? 'amber' : 'green'}`}>{item.status.toUpperCase()}</span><div className="decision-actions">{item.status === 'proposed' ? <><button className="small-action primary-action" disabled={busy} onClick={() => void changeDecision(item.id, 'approve')}>Approve review</button><button className="small-action" disabled={busy} onClick={() => void changeDecision(item.id, 'reject')}>Reject</button></> : item.status === 'approved' ? <button className="small-action" disabled={busy} onClick={() => void changeDecision(item.id, 'simulate')}>Mark investigation simulated</button> : <span className="decision-note">No ad account action</span>}</div></div>) : <Empty text={overview ? 'No campaign/SKU groups met the documented investigation rule.' : 'Load a dataset to evaluate the rule.'} />}
-          </section><div className="notice neutral"><CircleHelp size={15} /><span>Approving means a human approved an investigation item. Simulation only records the review workflow; it never changes campaign spend.</span></div></>}
-        {section === 'execution' && <><div className="page-heading"><div><div className="eyebrow">AUDIT TRAIL</div><h1>Decision history</h1><p>Recorded approvals, rejections, and simulation states. No live advertising execution is available.</p></div></div><section className="panel"><div className="panel-head"><div><h2>Review events</h2><p>Persistent local decision metadata</p></div></div>{history.length ? history.map((event, index) => <div className="quality-row" key={`${event.decision_id}-${event.created_at}-${index}`}><span><b>{event.target}</b><small>{new Date(event.created_at).toLocaleString()} · {event.reason || 'No note'}</small></span><span className="status-tag green">{event.status}</span></div>) : <Empty text="Review decisions will appear here." />}</section></>}
+            {recommendations.length ? recommendations.map((item) => <div className="decision-row" key={item.id}><div className="decision-copy"><b>{item.title}</b><small>{item.channel} · {item.ad_platform} · {item.evidence.record_count} records</small><p>Observed return-adjusted profit: <strong>{money(item.evidence.return_adjusted_net_profit)}</strong>. This flags a review; it does not establish cause or estimate impact.</p><small>Rule {item.evidence.rule_id} · dataset {item.dataset_id.slice(0, 10)}</small></div><span className={`status-tag ${item.status === 'proposed' ? 'amber' : item.status === 'rolled_back' ? 'neutral' : 'green'}`}>{(decisionStatusLabels[item.status] || item.status).toUpperCase()}</span><div className="decision-actions">{item.status === 'proposed' ? <><button className="small-action primary-action" disabled={busy} onClick={() => void changeDecision(item.id, 'approve')}>Approve review</button><button className="small-action" disabled={busy} onClick={() => void changeDecision(item.id, 'reject')}>Reject</button></> : item.status === 'approved' ? <button className="small-action" disabled={busy} onClick={() => void changeDecision(item.id, 'simulate')}>Mark investigation simulated</button> : item.status === 'simulated' ? <button className="small-action" disabled={busy} onClick={() => openRollback(item)}>Rollback</button> : <span className="decision-note">{item.status === 'rolled_back' ? 'Rolled back · kept in history' : 'No ad account action'}</span>}</div></div>) : <Empty text={overview ? 'No campaign/SKU groups met the documented investigation rule.' : 'Load a dataset to evaluate the rule.'} />}
+          </section><div className="notice neutral"><CircleHelp size={15} /><span>Approving means a human approved an investigation item. Simulation only records the review workflow; it never changes campaign spend.</span></div>
+          {rollbackTarget && (() => {
+            const ctx = rollbackTarget.rollback || {};
+            const previousLabel = decisionStatusLabels[ctx.previous_state] || ctx.previous_state || 'Unknown';
+            return <div className="rb-overlay" role="presentation"><div className="rb-modal" role="dialog" aria-modal="true" aria-labelledby="rb-title">
+              <div className="rb-head"><h2 id="rb-title">Simulation Rollback</h2><span className="mini-tag">NO AD ACCOUNT CHANGE</span></div>
+              <dl className="rb-facts">
+                <div><dt>Decision</dt><dd>{rollbackTarget.title}</dd></div>
+                <div><dt>Current state</dt><dd>Simulated (applied)</dd></div>
+                <div><dt>Previous state</dt><dd>{previousLabel}</dd></div>
+                <div><dt>After rollback</dt><dd>Status changes from Simulated to <b>Rolled Back</b>, restoring the exact earlier state: {previousLabel}. The original decision and its history are kept.</dd></div>
+              </dl>
+              {ctx.conflict && <div className="rb-alert" role="alert"><b>Conflict</b><span>{ctx.conflict}</span></div>}
+              <label className="rb-field">Rollback reason
+                <select value={rollbackReason} onChange={(event) => setRollbackReason(event.target.value)}>
+                  <option value="">Select a reason</option>
+                  {['Performance worsened', 'Decision was incorrect', 'New information became available', 'Budget changed', 'Other'].map((reason) => <option key={reason} value={reason}>{reason}</option>)}
+                </select>
+              </label>
+              <label className="rb-field">Details {rollbackReason === 'Other' ? '(required)' : '(optional)'}
+                <textarea rows={2} maxLength={500} value={rollbackNote} onChange={(event) => setRollbackNote(event.target.value)} />
+              </label>
+              {rollbackError && <div className="rb-alert" role="alert"><b>Rollback Failed</b><span>{rollbackError}</span></div>}
+              <div className="rb-actions">
+                <button type="button" className="small-action" disabled={busy} onClick={() => setRollbackTarget(null)}>Cancel</button>
+                <button type="button" className="small-action primary-action" disabled={busy || !rollbackReason || (rollbackReason === 'Other' && !rollbackNote.trim()) || Boolean(ctx.conflict)} onClick={() => void confirmRollback()}>Rollback Decision</button>
+              </div>
+            </div></div>;
+          })()}</>}
+        {section === 'execution' && <><div className="page-heading"><div><div className="eyebrow">AUDIT TRAIL</div><h1>Decision history</h1><p>Recorded approvals, rejections, and simulation states. No live advertising execution is available.</p></div></div><section className="panel"><div className="panel-head"><div><h2>Review events</h2><p>Persistent local decision metadata</p></div></div>{history.length ? history.map((event, index) => <div className="quality-row" key={`${event.decision_id}-${event.created_at}-${index}`}><span><b>{event.target}</b><small>{new Date(event.created_at).toLocaleString()} · {event.reason || 'No note'}</small></span><span className="status-tag green">{decisionStatusLabels[event.status] || event.status}</span></div>) : <Empty text="Review decisions will appear here." />}</section>{audit.length > 0 && <section className="panel"><div className="panel-head"><div><h2>Simulation rollback audit</h2><p>Separate record of each rollback</p></div></div>{audit.map((entry, index) => <div className="quality-row" key={`${entry.decision_id}-${index}`}><span><b>{entry.target}</b><small>Decision {String(entry.decision_id).slice(0, 10)} · restored {decisionStatusLabels[entry.previous_state] || entry.previous_state} from {decisionStatusLabels[entry.rolled_back_state] || entry.rolled_back_state} · {entry.reason} · {entry.performed_by} · {new Date(entry.created_at).toLocaleString()}</small></span><span className="status-tag neutral">Rolled Back</span></div>)}</section>}</>}
         {section === 'opportunities' && <>
           <div className="page-heading"><div><h1>Opportunity Radar</h1><p>Campaign opportunities and efficiency gaps found in the filtered data. Candidates are rule-based and for review only.</p></div><div className="explorer-meta"><span>Last updated: {lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</span></div></div>
           {!radar ? (loading || !campaigns ? <div className="state-card"><LoaderCircle className="spin" />Scanning for opportunities…</div> : <section className="panel"><Empty text="Opportunities appear once campaign data with spend and revenue is available." /></section>) : <>

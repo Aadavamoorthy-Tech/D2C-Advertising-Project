@@ -300,3 +300,34 @@ def test_decisions_require_approval_before_simulation_and_never_execute_live(mon
     assert simulated.json()["status"] == "simulated"
     assert "no advertising account was changed" in simulated.json()["message"]
     assert client.get("/api/decision-history").json()["items"][0]["status"] == "simulated"
+
+    path = f"/api/recommendations/{candidate['id']}/rollback"
+    assert client.post(path, json={"reason": "Bogus"}).status_code == 422
+    assert client.post(path, json={"reason": "Other"}).status_code == 422
+
+    # A newer applied decision on the same target blocks the rollback.
+    with app_module.decision_store() as db:
+        db.execute(
+            "INSERT INTO decisions (decision_id, dataset_id, target, evidence_json, status, updated_at) "
+            "VALUES ('newer1', 'dataset', 'campaign-a|sku-a', '{}', 'simulated', 't')"
+        )
+        db.execute(
+            "INSERT INTO decision_events (decision_id, status, reason, created_at) VALUES ('newer1', 'simulated', '', 't')"
+        )
+        db.commit()
+    blocked = client.post(path, json={"reason": "Budget changed"})
+    assert blocked.status_code == 409 and "newer decision" in blocked.json()["detail"]
+    with app_module.decision_store() as db:
+        db.execute("DELETE FROM decisions WHERE decision_id = 'newer1'")
+        db.execute("DELETE FROM decision_events WHERE decision_id = 'newer1'")
+        db.commit()
+
+    done = client.post(path, json={"reason": "Performance worsened", "performed_by": "Tester"})
+    assert done.status_code == 200
+    assert done.json()["status"] == "rolled_back"
+    assert done.json()["restored_state"] == "approved"
+    assert client.post(path, json={"reason": "Budget changed"}).status_code == 409
+    audit = client.get("/api/rollback-audit").json()["items"]
+    assert audit[0]["previous_state"] == "approved" and audit[0]["performed_by"] == "Tester"
+    history = client.get("/api/decision-history").json()["items"]
+    assert [e["status"] for e in history].count("simulated") == 1

@@ -116,6 +116,21 @@ class DecisionRequest(BaseModel):
     reason: str = Field(default="", max_length=1000)
 
 
+ROLLBACK_REASONS = {
+    "Performance worsened",
+    "Decision was incorrect",
+    "New information became available",
+    "Budget changed",
+    "Other",
+}
+
+
+class RollbackRequest(BaseModel):
+    reason: str = Field(max_length=200)
+    note: str = Field(default="", max_length=1000)
+    performed_by: str = Field(default="", max_length=100)
+
+
 def exasol_password() -> str:
     configured = os.getenv("EXASOL_PASSWORD")
     if configured:
@@ -397,8 +412,55 @@ def decision_db() -> sqlite3.Connection:
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rollback_audit (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id TEXT NOT NULL,
+            previous_state TEXT NOT NULL,
+            rolled_back_state TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            performed_by TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     db.commit()
     return db
+
+
+def rollback_context(db: sqlite3.Connection, decision_id: str) -> dict[str, Any]:
+    """Previous state (from recorded history) and any newer decision on the same target."""
+    events = db.execute(
+        "SELECT event_id, status FROM decision_events WHERE decision_id = ? ORDER BY event_id",
+        (decision_id,),
+    ).fetchall()
+    applied = [i for i, e in enumerate(events) if e["status"] == "simulated"]
+    if not applied:
+        return {"previous_state": None, "conflict": None}
+    index = applied[-1]
+    previous = events[index - 1]["status"] if index > 0 else "proposed"
+    target = db.execute(
+        "SELECT target FROM decisions WHERE decision_id = ?", (decision_id,)
+    ).fetchone()
+    conflict = None
+    if target:
+        newer = db.execute(
+            """
+            SELECT e.decision_id FROM decision_events e
+            JOIN decisions d ON d.decision_id = e.decision_id
+            WHERE d.target = ? AND e.decision_id != ? AND e.status = 'simulated'
+              AND e.event_id > ?
+            LIMIT 1
+            """,
+            (target["target"], decision_id, events[index]["event_id"]),
+        ).fetchone()
+        if newer:
+            conflict = (
+                "A newer decision has already changed this campaign/SKU "
+                f"(decision {newer['decision_id'][:8]}). Roll that decision back first."
+            )
+    return {"previous_state": previous, "conflict": conflict}
 
 
 @contextmanager
@@ -820,12 +882,81 @@ def recommendations() -> dict[str, Any]:
             row["decision_id"]: dict(row)
             for row in db.execute("SELECT * FROM decisions").fetchall()
         }
-    for item in candidates:
-        state = states.get(item["id"])
-        if state:
-            item["status"] = state["status"]
-            item["reason"] = state["reason"]
+        for item in candidates:
+            state = states.get(item["id"])
+            if state:
+                item["status"] = state["status"]
+                item["reason"] = state["reason"]
+                if state["status"] == "simulated":
+                    item["rollback"] = rollback_context(db, item["id"])
     return {"source": source, "items": candidates}
+
+
+@app.post("/api/recommendations/{decision_id}/rollback")
+def rollback_recommendation(decision_id: str, body: RollbackRequest) -> dict[str, Any]:
+    if not decision_id.isalnum():
+        raise HTTPException(status_code=422, detail="Invalid decision identifier.")
+    if body.reason not in ROLLBACK_REASONS:
+        raise HTTPException(status_code=422, detail="Select a valid rollback reason.")
+    if body.reason == "Other" and not body.note.strip():
+        raise HTTPException(status_code=422, detail="Describe the reason when selecting Other.")
+    reason = body.reason if not body.note.strip() else f"{body.reason}: {body.note.strip()}"
+    user = body.performed_by.strip() or "Local reviewer (no sign-in)"
+    with decision_store() as db:
+        current = db.execute(
+            "SELECT status FROM decisions WHERE decision_id = ?", (decision_id,)
+        ).fetchone()
+        if not current:
+            raise HTTPException(status_code=404, detail="Recommendation was not found.")
+        if current["status"] == "rolled_back":
+            raise HTTPException(status_code=409, detail="This decision has already been rolled back.")
+        if current["status"] != "simulated":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Only applied decisions can be rolled back; this one is {current['status']}.",
+            )
+        context = rollback_context(db, decision_id)
+        if context["conflict"]:
+            raise HTTPException(status_code=409, detail=context["conflict"])
+        now = datetime.now(timezone.utc).isoformat()
+        db.execute(
+            "UPDATE decisions SET status = 'rolled_back', reason = ?, updated_at = ? WHERE decision_id = ?",
+            (reason, now, decision_id),
+        )
+        db.execute(
+            "INSERT INTO decision_events (decision_id, status, reason, created_at) VALUES (?, 'rolled_back', ?, ?)",
+            (decision_id, reason, now),
+        )
+        db.execute(
+            """
+            INSERT INTO rollback_audit
+            (decision_id, previous_state, rolled_back_state, reason, performed_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (decision_id, context["previous_state"], "simulated", reason, user, now),
+        )
+        db.commit()
+    return {
+        "id": decision_id,
+        "status": "rolled_back",
+        "restored_state": context["previous_state"],
+        "updated_at": now,
+        "message": "Simulation rollback recorded; no advertising account was changed.",
+    }
+
+
+@app.get("/api/rollback-audit")
+def rollback_audit() -> dict[str, Any]:
+    with decision_db() as db:
+        rows = db.execute(
+            """
+            SELECT a.decision_id, a.previous_state, a.rolled_back_state, a.reason,
+                   a.performed_by, a.created_at, d.target
+            FROM rollback_audit a JOIN decisions d ON d.decision_id = a.decision_id
+            ORDER BY a.audit_id DESC
+            """
+        ).fetchall()
+    return {"items": [dict(row) for row in rows]}
 
 
 @app.post("/api/recommendations/{decision_id}/{action}")
