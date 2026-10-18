@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import io
 import json
 import logging
@@ -17,7 +18,7 @@ from typing import Any, Iterator, Literal
 from urllib.error import HTTPError, URLError
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -93,7 +94,7 @@ app.add_middleware(
     ).split(","),
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 demo_frame: pd.DataFrame | None = None
@@ -110,6 +111,43 @@ demo_status: dict[str, Any] = {
 
 class SummaryRequest(BaseModel):
     batch_size: int = Field(default=DEFAULT_BATCH_SIZE, ge=1, le=1000)
+
+
+DB_START_STEPS = (
+    "requested", "starting_exasol", "starting_tunnel", "updating_render",
+    "deploying", "verifying", "done", "failed",
+)
+DB_START_NEXT = {
+    "requested": {"starting_exasol", "failed"},
+    "starting_exasol": {"starting_tunnel", "failed"},
+    "starting_tunnel": {"updating_render", "failed"},
+    "updating_render": {"deploying", "verifying", "failed"},
+    "deploying": {"verifying", "failed"},
+    "verifying": {"done", "failed"},
+    "done": set(),
+    "failed": set(),
+}
+_db_start_lock = threading.Lock()
+_db_start_job: dict[str, Any] = {
+    "job_id": None,
+    "state": "idle",
+    "step": "idle",
+    "message": "Database startup has not been requested.",
+    "updated_at": None,
+}
+_db_start_last_heartbeat = 0.0
+_db_start_last_request = float("-inf")
+_db_start_claimed_job: str | None = None
+_db_start_claimed_at = 0.0
+
+
+class HelperReport(BaseModel):
+    job_id: str = Field(min_length=1, max_length=80)
+    step: Literal[
+        "requested", "starting_exasol", "starting_tunnel", "updating_render",
+        "deploying", "verifying", "done", "failed",
+    ]
+    message: str = Field(min_length=1, max_length=240)
 
 
 class DecisionRequest(BaseModel):
@@ -1172,3 +1210,190 @@ def decision_history() -> dict[str, Any]:
         item["evidence"] = json.loads(item.pop("evidence_json"))
         items.append(item)
     return {"items": items, "execution_mode": "review and simulation only"}
+
+
+def _require_service_token(authorization: str | None, env_name: str) -> None:
+    expected = os.getenv(env_name, "")
+    if not expected:
+        raise HTTPException(status_code=503, detail=f"{env_name} is not configured.")
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+
+def _db_start_public_state() -> dict[str, Any]:
+    with _db_start_lock:
+        state = dict(_db_start_job)
+        state["helper_online"] = time.monotonic() - _db_start_last_heartbeat <= 45
+    state.pop("job_id", None)
+    return state
+
+
+def _exasol_is_reachable() -> bool:
+    try:
+        with exasol_connection() as conn:
+            conn.execute("SELECT 1").fetchall()
+        return True
+    except Exception as exc:
+        logger.info("Exasol reachability check failed (%s).", type(exc).__name__)
+        return False
+
+
+def _db_start_demo_guard() -> None:
+    if DEMO_MODE:
+        raise HTTPException(status_code=404, detail="Database startup is not applicable in demo mode.")
+
+
+@app.post("/api/db/start")
+def request_database_start(
+    response: Response,
+) -> dict[str, Any]:
+    _db_start_demo_guard()
+    global _db_start_last_request, _db_start_claimed_job
+    with _db_start_lock:
+        if _db_start_job["state"] in {"checking", "running"}:
+            response.status_code = 202
+            return {**_db_start_job, "helper_online": time.monotonic() - _db_start_last_heartbeat <= 45}
+        now = time.monotonic()
+        if now - _db_start_last_request < 60:
+            raise HTTPException(status_code=429, detail="Please wait before requesting another database start.")
+        job_id = uuid.uuid4().hex
+        now_text = datetime.now(timezone.utc).isoformat()
+        _db_start_job.update(
+            job_id=job_id,
+            state="checking",
+            step="requested",
+            message="Checking whether the live Exasol database is already running.",
+            updated_at=now_text,
+        )
+        _db_start_claimed_job = None
+
+    if _exasol_is_reachable():
+        with _db_start_lock:
+            if _db_start_job["job_id"] == job_id:
+                _db_start_job.update(
+                    state="already_running",
+                    step="done",
+                    message="Database is already running.",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+                response.status_code = 200
+            return {**_db_start_job, "helper_online": time.monotonic() - _db_start_last_heartbeat <= 45}
+
+    with _db_start_lock:
+        if _db_start_job["job_id"] != job_id:
+            raise HTTPException(status_code=409, detail="A newer database start request is active.")
+        if time.monotonic() - _db_start_last_heartbeat > 45:
+            _db_start_job.update(
+                state="failed",
+                step="failed",
+                message="The laptop helper is offline. Start the D2C Exasol helper and try again.",
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            raise HTTPException(status_code=503, detail="The laptop helper is offline. Start the D2C Exasol helper and try again.")
+        _db_start_job.update(
+            state="running",
+            step="requested",
+            message="Database start requested; waiting for the laptop helper.",
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        _db_start_last_request = time.monotonic()
+        response.status_code = 202
+        return {**_db_start_job, "helper_online": True}
+
+
+@app.get("/api/db/start/status")
+def database_start_status() -> dict[str, Any]:
+    _db_start_demo_guard()
+    state = _db_start_public_state()
+    if state["state"] in {"idle", "already_running"}:
+        reachable = _exasol_is_reachable()
+        with _db_start_lock:
+            if reachable and _db_start_job["state"] in {"idle", "already_running"}:
+                _db_start_job.update(
+                    state="already_running",
+                    step="done",
+                    message="Database is already running.",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+            elif not reachable and _db_start_job["state"] == "already_running":
+                _db_start_job.update(
+                    state="idle",
+                    step="idle",
+                    message="Database is not currently reachable.",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+            state = dict(_db_start_job)
+            state["helper_online"] = time.monotonic() - _db_start_last_heartbeat <= 45
+        state.pop("job_id", None)
+    return {key: state[key] for key in ("helper_online", "state", "step", "message", "updated_at")}
+
+
+@app.get("/api/helper/poll")
+def helper_poll(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _db_start_demo_guard()
+    _require_service_token(authorization, "HELPER_TOKEN")
+    global _db_start_last_heartbeat, _db_start_claimed_job, _db_start_claimed_at
+    with _db_start_lock:
+        now = time.monotonic()
+        _db_start_last_heartbeat = now
+        job_id = _db_start_job["job_id"]
+        if (
+            _db_start_job["state"] == "running"
+            and _db_start_job["step"] == "requested"
+            and job_id
+            and (_db_start_claimed_job != job_id or now - _db_start_claimed_at > 45)
+        ):
+            _db_start_claimed_job = job_id
+            _db_start_claimed_at = now
+            return {"action": "start", "job_id": job_id}
+    return {"action": "none"}
+
+
+@app.post("/api/helper/report")
+def helper_report(
+    report: HelperReport,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _db_start_demo_guard()
+    _require_service_token(authorization, "HELPER_TOKEN")
+    global _db_start_last_heartbeat, _db_start_claimed_job
+    message = " ".join("".join(char for char in report.message if char >= " " and char != "\x7f").split())
+    if not message:
+        raise HTTPException(status_code=422, detail="A short progress message is required.")
+    with _db_start_lock:
+        current_id = _db_start_job["job_id"]
+        current_state = _db_start_job["state"]
+        if current_id != report.job_id:
+            if current_state == "running":
+                raise HTTPException(status_code=409, detail="Another database start is already active.")
+            if current_state != "idle" and report.step != "requested":
+                raise HTTPException(status_code=409, detail="A new job must begin with the requested step.")
+        elif current_state in {"succeeded", "failed"}:
+            if report.step != _db_start_job["step"]:
+                if DB_START_STEPS.index(report.step) < DB_START_STEPS.index(_db_start_job["step"]):
+                    _db_start_last_heartbeat = time.monotonic()
+                    return {**_db_start_job, "accepted": True}
+                raise HTTPException(status_code=409, detail="A completed job cannot advance.")
+        elif current_state == "running" and report.step != _db_start_job["step"]:
+            current_step = _db_start_job["step"]
+            if report.step in DB_START_NEXT[current_step]:
+                pass
+            elif DB_START_STEPS.index(report.step) < DB_START_STEPS.index(current_step):
+                _db_start_last_heartbeat = time.monotonic()
+                return {**_db_start_job, "accepted": True}
+            else:
+                raise HTTPException(status_code=409, detail="Progress step is not a valid next step.")
+        _db_start_job.update(
+            job_id=report.job_id,
+            state="succeeded" if report.step == "done" else "failed" if report.step == "failed" else "running",
+            step=report.step,
+            message=message[:240],
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        _db_start_last_heartbeat = time.monotonic()
+        if report.step != "requested":
+            _db_start_claimed_job = report.job_id
+        return {**_db_start_job, "accepted": True}

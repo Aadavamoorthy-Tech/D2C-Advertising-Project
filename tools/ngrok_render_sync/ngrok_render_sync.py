@@ -583,8 +583,11 @@ def wait_for_deploy(client: RenderClient, deploy_id: str, timeout: float, interv
 
 def sync_once(cfg: Config, client: RenderClient, store: StateStore, hostport: str, *, dry_run: bool = False,
               force_deploy: bool = False, allow_create: bool = False, out: Callable[[str], None] = say,
-              sleep: Callable[[float], None] = time.sleep) -> SyncResult:
+              sleep: Callable[[float], None] = time.sleep,
+              on_stage: Callable[[str], None] | None = None) -> SyncResult:
     state = store.load()
+    if on_stage:
+        on_stage("updating_render")
     current = client.get_env()
     desired = build_dsn(current, hostport, allow_create)
     pending = state.get("pending")
@@ -611,6 +614,8 @@ def sync_once(cfg: Config, client: RenderClient, store: StateStore, hostport: st
         state["pending"] = {"desired": desired, "env_applied": True, "forced": True,
                             "env_applied_at": iso(utcnow()), "created_at": iso(utcnow())}
         store.save(state)
+    if on_stage:
+        on_stage("deploying")
     deploy_id = ensure_deployment(client, store, state, out, sleep)
     return SyncResult("updated" if changed else "recovered", desired, deploy_id=deploy_id,
                       message=f"Deployment requested: {deploy_id}")
