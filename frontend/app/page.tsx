@@ -229,7 +229,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
-  useEffect(() => { if (section === 'campaigns') void loadCampaigns(); }, [section, loadCampaigns]);
+  useEffect(() => { if (section === 'campaigns' || section === 'opportunities') void loadCampaigns(); }, [section, loadCampaigns]);
   useEffect(() => { if (section === 'decisions' || section === 'execution') void loadDecisions(); }, [section, loadDecisions]);
   useEffect(() => { document.body.dataset.theme = light ? 'light' : 'dark'; }, [light]);
 
@@ -327,6 +327,28 @@ export default function Home() {
     const filtered = term ? rows.filter((row) => [row.campaign_id, row.sku_id, row.ad_platform, row.channel].some((value) => String(value ?? '').toLowerCase().includes(term))) : rows;
     return sortRows(filtered, campaignSort);
   }, [campaigns, search, campaignSort]);
+  const radar = useMemo(() => {
+    const groups: Payload[] = (campaigns?.items || []).filter((row: Payload) => row.spend != null && row.roas != null && Number(row.spend) > 0);
+    const blended = Number(overview?.metrics?.roas);
+    if (!groups.length || !Number.isFinite(blended) || blended <= 0) return null;
+    const spends = groups.map((row) => Number(row.spend)).sort((a, b) => a - b);
+    const medianSpend = spends[Math.floor(spends.length / 2)];
+    const material = groups.filter((row) => Number(row.spend) >= medianSpend);
+    const highRoas = material.filter((row) => Number(row.roas) >= blended * 1.2).sort((a, b) => Number(b.roas) - Number(a.roas)).slice(0, 5);
+    const gaps = material.filter((row) => Number(row.roas) <= blended * 0.8).sort((a, b) => (Number(b.spend) - Number(b.attributed_revenue || 0)) - (Number(a.spend) - Number(a.attributed_revenue || 0))).slice(0, 5);
+    const ranked = ((overview?.channels || []) as Payload[]).filter((row) => row.roas != null && Number(row.spend) > 0).sort((a, b) => Number(b.roas) - Number(a.roas));
+    const from = ranked.length > 1 ? ranked[ranked.length - 1] : null;
+    const to = ranked.length > 1 ? ranked[0] : null;
+    const realloc = from && to && Number(to.roas) > Number(from.roas) ? { from, to } : null;
+    const days: Payload[] = overview?.trend || [];
+    const values = days.map((day) => Number(day.revenue || 0));
+    const mean = values.length ? values.reduce((total, value) => total + value, 0) / values.length : 0;
+    const deviation = Math.sqrt(values.reduce((total, value) => total + (value - mean) ** 2, 0) / (values.length || 1));
+    const unusual = deviation > 0
+      ? days.map((day, index) => ({ date: day.date, revenue: values[index], z: (values[index] - mean) / deviation })).filter((day) => Math.abs(day.z) >= 2).sort((a, b) => Math.abs(b.z) - Math.abs(a.z)).slice(0, 3)
+      : [];
+    return { blended, medianSpend, highRoas, gaps, realloc, unusual, mean };
+  }, [campaigns, overview]);
   const campaignPageSize = 15;
   const campaignPages = Math.max(1, Math.ceil(visibleCampaigns.length / campaignPageSize));
   const campaignPage = Math.min(page, campaignPages);
@@ -567,7 +589,35 @@ export default function Home() {
             {recommendations.length ? recommendations.map((item) => <div className="decision-row" key={item.id}><div className="decision-copy"><b>{item.title}</b><small>{item.channel} · {item.ad_platform} · {item.evidence.record_count} records</small><p>Observed return-adjusted profit: <strong>{money(item.evidence.return_adjusted_net_profit)}</strong>. This flags a review; it does not establish cause or estimate impact.</p><small>Rule {item.evidence.rule_id} · dataset {item.dataset_id.slice(0, 10)}</small></div><span className={`status-tag ${item.status === 'proposed' ? 'amber' : 'green'}`}>{item.status.toUpperCase()}</span><div className="decision-actions">{item.status === 'proposed' ? <><button className="small-action primary-action" disabled={busy} onClick={() => void changeDecision(item.id, 'approve')}>Approve review</button><button className="small-action" disabled={busy} onClick={() => void changeDecision(item.id, 'reject')}>Reject</button></> : item.status === 'approved' ? <button className="small-action" disabled={busy} onClick={() => void changeDecision(item.id, 'simulate')}>Mark investigation simulated</button> : <span className="decision-note">No ad account action</span>}</div></div>) : <Empty text={overview ? 'No campaign/SKU groups met the documented investigation rule.' : 'Load a dataset to evaluate the rule.'} />}
           </section><div className="notice neutral"><CircleHelp size={15} /><span>Approving means a human approved an investigation item. Simulation only records the review workflow; it never changes campaign spend.</span></div></>}
         {section === 'execution' && <><div className="page-heading"><div><div className="eyebrow">AUDIT TRAIL</div><h1>Decision history</h1><p>Recorded approvals, rejections, and simulation states. No live advertising execution is available.</p></div></div><section className="panel"><div className="panel-head"><div><h2>Review events</h2><p>Persistent local decision metadata</p></div></div>{history.length ? history.map((event, index) => <div className="quality-row" key={`${event.decision_id}-${event.created_at}-${index}`}><span><b>{event.target}</b><small>{new Date(event.created_at).toLocaleString()} · {event.reason || 'No note'}</small></span><span className="status-tag green">{event.status}</span></div>) : <Empty text="Review decisions will appear here." />}</section></>}
-        {!['overview', 'campaigns', 'insights', 'data', 'summary', 'decisions', 'execution'].includes(section) && <><div className="page-heading"><div><div className="eyebrow">ADPILOT WORKSPACE</div><h1>{navItems.find((item) => item.id === section)?.label}</h1><p>This screen is reserved for a future workflow; no unsupported analytics are shown.</p></div></div><section className="panel"><Empty text="This local MVP currently provides verified campaign metrics, rule-based investigation candidates, human review history, and AI-generated summaries. It does not generate budget allocations or execute live ad-account changes." /></section></>}
+        {section === 'opportunities' && <>
+          <div className="page-heading"><div><h1>Opportunity Radar</h1><p>Campaign opportunities and efficiency gaps found in the filtered data. Candidates are rule-based and for review only.</p></div><div className="explorer-meta"><span>Last updated: {lastUpdated ? lastUpdated.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—'}</span></div></div>
+          {!radar ? (loading || !campaigns ? <div className="state-card"><LoaderCircle className="spin" />Scanning for opportunities…</div> : <section className="panel"><Empty text="Opportunities appear once campaign data with spend and revenue is available." /></section>) : <>
+            <div className="explorer-kpis">
+              <div><span>Blended ROAS <Info text={metricHelp.roas} label="About ROAS" /></span><strong>{roasText(radar.blended)}</strong></div>
+              <div><span>High-ROAS Pockets</span><strong>{radar.highRoas.length}</strong></div>
+              <div><span>Efficiency Gaps</span><strong>{radar.gaps.length}</strong></div>
+              <div><span>Unusual Days</span><strong>{radar.unusual.length}</strong></div>
+            </div>
+            <section className="panel explorer-panel"><div className="panel-head"><div><h2>Budget Reallocation Candidate</h2><p>Channel ROAS comparison for the current filters.</p></div></div>
+              {radar.realloc ? <div className="radar-row"><div><b>Review shifting budget from {radar.realloc.from.channel} to {radar.realloc.to.channel}</b><small>{radar.realloc.from.channel} returns {roasText(radar.realloc.from.roas)} on {fullNumber(radar.realloc.from.spend)} spend; {radar.realloc.to.channel} returns {roasText(radar.realloc.to.roas)} on {fullNumber(radar.realloc.to.spend)} spend.</small></div><span className="mini-tag">{roasText(Number(radar.realloc.to.roas) - Number(radar.realloc.from.roas))} gap</span></div> : <Empty text="Channel ROAS values are too similar to suggest a reallocation." />}
+              <p className="radar-note">Observed ROAS only. Expected impact is not estimated and no spend is changed.</p>
+            </section>
+            <div className="radar-grid">
+              <section className="panel explorer-panel"><div className="panel-head"><div><h2>High-ROAS Pockets</h2><p>Campaigns at least 20% above blended ROAS with above-median spend.</p></div></div>
+                {radar.highRoas.length ? radar.highRoas.map((row) => <div className="radar-row" key={`${row.campaign_id}-${row.sku_id}-${row.ad_platform}`}><div><b>{row.campaign_id}</b><small>{row.channel} · Spend {fullNumber(row.spend)} · Revenue {fullNumber(row.attributed_revenue)}</small></div><strong>{roasText(row.roas)}</strong></div>) : <Empty text="No campaigns currently meet this rule." />}
+              </section>
+              <section className="panel explorer-panel"><div className="panel-head"><div><h2>Efficiency Gaps</h2><p>Campaigns at least 20% below blended ROAS with above-median spend.</p></div></div>
+                {radar.gaps.length ? radar.gaps.map((row) => <div className="radar-row" key={`${row.campaign_id}-${row.sku_id}-${row.ad_platform}`}><div><b>{row.campaign_id}</b><small>{row.channel} · Spend {fullNumber(row.spend)} · Revenue {fullNumber(row.attributed_revenue)}</small></div><strong>{roasText(row.roas)}</strong></div>) : <Empty text="No campaigns currently meet this rule." />}
+              </section>
+            </div>
+            <section className="panel explorer-panel"><div className="panel-head"><div><h2>Unusual Revenue Days</h2><p>Days where revenue is at least two standard deviations from the period average.</p></div></div>
+              {radar.unusual.length ? radar.unusual.map((day) => <div className="radar-row" key={day.date}><div><b>{dateOnly(day.date)}</b><small>Revenue {fullNumber(day.revenue)} vs. daily average {fullNumber(radar.mean)}</small></div><span className="mini-tag">{day.z > 0 ? 'Above average' : 'Below average'}</span></div>) : <Empty text="No unusual days in the selected period." />}
+              <p className="radar-note">Causes are not inferred. See Anomaly &amp; diagnosis for details.</p>
+            </section>
+          </>}
+        </>}
+
+        {!['overview', 'campaigns', 'opportunities', 'insights', 'data', 'summary', 'decisions', 'execution'].includes(section) && <><div className="page-heading"><div><div className="eyebrow">ADPILOT WORKSPACE</div><h1>{navItems.find((item) => item.id === section)?.label}</h1><p>This screen is reserved for a future workflow; no unsupported analytics are shown.</p></div></div><section className="panel"><Empty text="This local MVP currently provides verified campaign metrics, rule-based investigation candidates, human review history, and AI-generated summaries. It does not generate budget allocations or execute live ad-account changes." /></section></>}
       </section>
     </main>
   </div>;

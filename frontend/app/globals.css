@@ -88,4 +88,11 @@ select{color-scheme:dark}body[data-theme="light"] select{color-scheme:light}sele
 .explorer-table .chart-info{margin-left:3px;vertical-align:middle}
 .explorer-panel .table-scroll{overflow-x:auto}
 .explorer-table td:first-child,.explorer-table th:first-child{position:sticky;left:0;background:var(--panel);z-index:1}
+.radar-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.radar-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px;border-top:1px solid var(--line)}
+.radar-row>div{min-width:0}.radar-row b{display:block;font-size:11.5px}
+.radar-row small{display:block;margin-top:3px;color:var(--muted);font-size:10px}
+.radar-row strong{font:600 14px var(--display);white-space:nowrap}
+.radar-note{margin:0;padding:9px 16px;border-top:1px solid var(--line);color:var(--muted);font-size:9.5px}
+@media(max-width:900px){.radar-grid{grid-template-columns:1fr}}
 @media(max-width:760px){.explorer-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.explorer-meta{flex-wrap:wrap}.explorer-filters label{flex:1 1 140px}.explorer-filters select{width:100%}.explorer-chart{height:220px}.explorer-chart .spark-svg{height:170px}}
