@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import io
 import json
 import logging
@@ -17,7 +18,7 @@ from typing import Any, Iterator, Literal
 from urllib.error import HTTPError, URLError
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -93,7 +94,7 @@ app.add_middleware(
     ).split(","),
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 demo_frame: pd.DataFrame | None = None
@@ -110,6 +111,43 @@ demo_status: dict[str, Any] = {
 
 class SummaryRequest(BaseModel):
     batch_size: int = Field(default=DEFAULT_BATCH_SIZE, ge=1, le=1000)
+
+
+DB_START_STEPS = (
+    "requested", "starting_exasol", "starting_tunnel", "updating_render",
+    "deploying", "verifying", "done", "failed",
+)
+DB_START_NEXT = {
+    "requested": {"starting_exasol", "failed"},
+    "starting_exasol": {"starting_tunnel", "failed"},
+    "starting_tunnel": {"updating_render", "failed"},
+    "updating_render": {"deploying", "verifying", "failed"},
+    "deploying": {"verifying", "failed"},
+    "verifying": {"done", "failed"},
+    "done": set(),
+    "failed": set(),
+}
+_db_start_lock = threading.Lock()
+_db_start_job: dict[str, Any] = {
+    "job_id": None,
+    "state": "idle",
+    "step": "idle",
+    "message": "Database startup has not been requested.",
+    "updated_at": None,
+}
+_db_start_last_heartbeat = 0.0
+_db_start_last_request = float("-inf")
+_db_start_claimed_job: str | None = None
+_db_start_claimed_at = 0.0
+
+
+class HelperReport(BaseModel):
+    job_id: str = Field(min_length=1, max_length=80)
+    step: Literal[
+        "requested", "starting_exasol", "starting_tunnel", "updating_render",
+        "deploying", "verifying", "done", "failed",
+    ]
+    message: str = Field(min_length=1, max_length=240)
 
 
 class DecisionRequest(BaseModel):
@@ -247,21 +285,34 @@ def clean_records(frame: pd.DataFrame, columns: tuple[str, ...]) -> list[dict[st
     return result.to_dict(orient="records")
 
 
+def load_bundled_csv(source: str) -> tuple[pd.DataFrame, str]:
+    if not DEFAULT_CSV.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail="The bundled CSV dataset is unavailable.",
+        )
+    try:
+        return pd.read_csv(DEFAULT_CSV, parse_dates=["date"]), source
+    except (OSError, ValueError, pd.errors.ParserError) as exc:
+        logger.error("Bundled CSV dataset could not be loaded (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="The bundled CSV dataset could not be loaded.",
+        ) from exc
+
+
 def load_frame() -> tuple[pd.DataFrame, str]:
     if DEMO_MODE:
         global demo_frame
         if demo_frame is not None:
             return demo_frame.copy(), "demo_csv"
-        if not DEFAULT_CSV.is_file():
+        try:
+            return load_bundled_csv("demo_csv")
+        except HTTPException as exc:
             raise HTTPException(
                 status_code=503,
-                detail="Explicit demo mode is enabled, but the bundled CSV fixture is missing.",
-            )
-        try:
-            frame = pd.read_csv(DEFAULT_CSV, parse_dates=["date"])
-        except (OSError, ValueError, pd.errors.ParserError) as exc:
-            raise HTTPException(status_code=503, detail=f"Could not load demo CSV: {exc}") from exc
-        return frame, "demo_csv"
+                detail="Explicit demo mode is enabled, but the bundled CSV fixture could not be loaded.",
+            ) from exc
 
     now = time.monotonic()
     with _cache_lock:
@@ -272,17 +323,24 @@ def load_frame() -> tuple[pd.DataFrame, str]:
         try:
             fresh = fetch_exasol_frame()
         except HTTPException as exc:
-            if cached is not None and age < CACHE_MAX_STALE_SECONDS and exc.status_code == 503:
-                logger.warning("Exasol refresh failed; serving cached data aged %.0fs", age)
-                return cached.copy(), "exasol"
-            raise
+            if exc.status_code != 503:
+                raise
+            logger.warning("Exasol unavailable; using the bundled CSV fallback")
+            try:
+                frame, source = load_bundled_csv("csv_fallback")
+            except HTTPException:
+                if cached is not None and age < CACHE_MAX_STALE_SECONDS:
+                    logger.warning("CSV fallback unavailable; serving Exasol cache aged %.0fs", age)
+                    return cached.copy(), "exasol"
+                raise
+            return frame, source
         _cache["frame"] = fresh
         _cache["loaded_at"] = time.monotonic()
         return fresh.copy(), "exasol"
 
 
 def fetch_exasol_frame() -> pd.DataFrame:
-    """Read the full dataset from Exasol; never falls back to the CSV."""
+    """Read the full dataset from Exasol."""
     select_list = ", ".join(f'"{SOURCE_COLUMNS[name]}"' for name in CSV_COLUMNS)
     try:
         with exasol_connection() as conn:
@@ -558,10 +616,15 @@ def health() -> dict[str, Any]:
             conn.execute("SELECT 1").fetchone()
         return {"status": "ok", "mode": "live", "source": "Exasol"}
     except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Exasol is unavailable ({type(exc).__name__}). Check backend configuration.",
-        ) from exc
+        logger.warning("Exasol health check failed (%s); checking CSV fallback", type(exc).__name__)
+        try:
+            load_bundled_csv("csv_fallback")
+        except HTTPException as fallback_exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Exasol is unavailable and the bundled CSV fallback could not be loaded.",
+            ) from fallback_exc
+        return {"status": "ok", "mode": "fallback", "source": "local CSV fallback"}
 
 
 @app.get("/api/datasets/status")
@@ -586,14 +649,23 @@ def dataset_status() -> dict[str, Any]:
             "source": "Exasol",
         }
     except Exception as exc:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "unavailable",
-                "source": "Exasol",
-                "error": f"Connection failed ({type(exc).__name__}); check backend configuration.",
-            },
-        )
+        logger.warning("Exasol dataset status check failed (%s); using CSV fallback", type(exc).__name__)
+        try:
+            frame, _ = load_bundled_csv("csv_fallback")
+        except HTTPException as fallback_exc:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unavailable",
+                    "source": "CSV fallback",
+                    "error": "Exasol is unavailable and the bundled CSV fallback could not be loaded.",
+                },
+            )
+        return {
+            "status": "ready",
+            "row_count": int(len(frame)),
+            "source": "CSV fallback",
+        }
 
 
 @app.post("/api/datasets/ingest")
@@ -701,10 +773,13 @@ def overview(
     for name, group in selected.groupby("channel", dropna=False):
         channels.append({"channel": str(name), **aggregate(group)})
     quality = quality_report(selected)
-    status = dict(demo_status) if DEMO_MODE else {"status": "ready", "row_count": len(frame)}
+    status = dict(demo_status) if source == "demo_csv" else {
+        "status": "ready",
+        "row_count": len(frame),
+    }
     return {
         "source": source,
-        "is_demo": DEMO_MODE,
+        "is_demo": source != "exasol",
         "dataset_status": status,
         "filters": {"channel": channel, "campaign": campaign, "sku": sku, "date_from": date_from, "date_to": date_to},
         "metrics": aggregate(selected),
@@ -1172,3 +1247,216 @@ def decision_history() -> dict[str, Any]:
         item["evidence"] = json.loads(item.pop("evidence_json"))
         items.append(item)
     return {"items": items, "execution_mode": "review and simulation only"}
+
+
+def _require_service_token(authorization: str | None, env_name: str) -> None:
+    expected = os.getenv(env_name, "")
+    if not expected:
+        raise HTTPException(status_code=503, detail=f"{env_name} is not configured.")
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not supplied or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+
+def _db_start_public_state() -> dict[str, Any]:
+    with _db_start_lock:
+        state = dict(_db_start_job)
+        state["helper_online"] = time.monotonic() - _db_start_last_heartbeat <= 45
+    state.pop("job_id", None)
+    return state
+
+
+def _exasol_is_reachable() -> bool:
+    try:
+        with exasol_connection() as conn:
+            conn.execute("SELECT 1").fetchall()
+        return True
+    except Exception as exc:
+        logger.info("Exasol reachability check failed (%s).", type(exc).__name__)
+        return False
+
+
+@app.post("/api/db/start")
+def request_database_start(
+    response: Response,
+) -> dict[str, Any]:
+    global _db_start_last_request, _db_start_claimed_job
+    with _db_start_lock:
+        if _db_start_job["state"] in {"checking", "running"}:
+            response.status_code = 202
+            return {**_db_start_job, "helper_online": time.monotonic() - _db_start_last_heartbeat <= 45}
+        now = time.monotonic()
+        if now - _db_start_last_request < 60:
+            raise HTTPException(status_code=429, detail="Please wait before requesting another database start.")
+        job_id = uuid.uuid4().hex
+        now_text = datetime.now(timezone.utc).isoformat()
+        _db_start_job.update(
+            job_id=job_id,
+            state="checking",
+            step="requested",
+            message="Checking whether the live Exasol database is already running.",
+            updated_at=now_text,
+        )
+        _db_start_claimed_job = None
+
+    if not DEMO_MODE and _exasol_is_reachable():
+        with _db_start_lock:
+            if _db_start_job["job_id"] == job_id:
+                _db_start_job.update(
+                    state="already_running",
+                    step="done",
+                    message="Database is already running.",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+                response.status_code = 200
+            return {**_db_start_job, "helper_online": time.monotonic() - _db_start_last_heartbeat <= 45}
+
+    with _db_start_lock:
+        if _db_start_job["job_id"] != job_id:
+            raise HTTPException(status_code=409, detail="A newer database start request is active.")
+        if time.monotonic() - _db_start_last_heartbeat > 45:
+            _db_start_job.update(
+                state="failed",
+                step="failed",
+                message="The laptop helper is offline. Start the D2C Exasol helper and try again.",
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            raise HTTPException(status_code=503, detail="The laptop helper is offline. Start the D2C Exasol helper and try again.")
+        _db_start_job.update(
+            state="running",
+            step="requested",
+            message="Database start requested; waiting for the laptop helper.",
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        _db_start_last_request = time.monotonic()
+        response.status_code = 202
+        return {**_db_start_job, "helper_online": True}
+
+
+@app.get("/api/db/start/status")
+def database_start_status() -> dict[str, Any]:
+    state = _db_start_public_state()
+    if not DEMO_MODE and state["state"] in {"idle", "already_running"}:
+        reachable = _exasol_is_reachable()
+        with _db_start_lock:
+            if reachable and _db_start_job["state"] in {"idle", "already_running"}:
+                _db_start_job.update(
+                    state="already_running",
+                    step="done",
+                    message="Database is already running.",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+            elif not reachable and _db_start_job["state"] == "already_running":
+                _db_start_job.update(
+                    state="idle",
+                    step="idle",
+                    message="Database is not currently reachable.",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+            state = dict(_db_start_job)
+            state["helper_online"] = time.monotonic() - _db_start_last_heartbeat <= 45
+        state.pop("job_id", None)
+    return {key: state[key] for key in ("helper_online", "state", "step", "message", "updated_at")}
+
+
+@app.get("/api/db/start/verify", include_in_schema=False)
+def verify_database_start() -> Any:
+    if DEMO_MODE:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "demo_mode",
+                "source": "CSV",
+                "mode": "demo",
+                "error": "The backend is still configured for CSV demo mode.",
+            },
+        )
+    try:
+        frame = fetch_exasol_frame()
+        with _cache_lock:
+            _cache["frame"] = frame
+            _cache["loaded_at"] = time.monotonic()
+        return {
+            "status": "ready",
+            "row_count": len(frame),
+            "source": "Exasol",
+            "mode": "live",
+        }
+    except Exception as exc:
+        logger.info("Database-start verification failed (%s).", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unavailable",
+                "source": "Exasol",
+                "error": f"Connection failed ({type(exc).__name__}); check backend configuration.",
+            },
+        )
+
+
+@app.get("/api/helper/poll")
+def helper_poll(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_service_token(authorization, "HELPER_TOKEN")
+    global _db_start_last_heartbeat, _db_start_claimed_job, _db_start_claimed_at
+    with _db_start_lock:
+        now = time.monotonic()
+        _db_start_last_heartbeat = now
+        job_id = _db_start_job["job_id"]
+        if (
+            _db_start_job["state"] == "running"
+            and _db_start_job["step"] == "requested"
+            and job_id
+            and (_db_start_claimed_job != job_id or now - _db_start_claimed_at > 45)
+        ):
+            _db_start_claimed_job = job_id
+            _db_start_claimed_at = now
+            return {"action": "start", "job_id": job_id}
+    return {"action": "none"}
+
+
+@app.post("/api/helper/report")
+def helper_report(
+    report: HelperReport,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_service_token(authorization, "HELPER_TOKEN")
+    global _db_start_last_heartbeat, _db_start_claimed_job
+    message = " ".join("".join(char for char in report.message if char >= " " and char != "\x7f").split())
+    if not message:
+        raise HTTPException(status_code=422, detail="A short progress message is required.")
+    with _db_start_lock:
+        current_id = _db_start_job["job_id"]
+        current_state = _db_start_job["state"]
+        if current_id != report.job_id:
+            if current_state == "running":
+                raise HTTPException(status_code=409, detail="Another database start is already active.")
+            if current_state != "idle" and report.step != "requested":
+                raise HTTPException(status_code=409, detail="A new job must begin with the requested step.")
+        elif current_state in {"succeeded", "failed"}:
+            if report.step != _db_start_job["step"]:
+                if DB_START_STEPS.index(report.step) < DB_START_STEPS.index(_db_start_job["step"]):
+                    _db_start_last_heartbeat = time.monotonic()
+                    return {**_db_start_job, "accepted": True}
+                raise HTTPException(status_code=409, detail="A completed job cannot advance.")
+        elif current_state == "running" and report.step != _db_start_job["step"]:
+            current_step = _db_start_job["step"]
+            if report.step in DB_START_NEXT[current_step]:
+                pass
+            elif DB_START_STEPS.index(report.step) < DB_START_STEPS.index(current_step):
+                _db_start_last_heartbeat = time.monotonic()
+                return {**_db_start_job, "accepted": True}
+            else:
+                raise HTTPException(status_code=409, detail="Progress step is not a valid next step.")
+        _db_start_job.update(
+            job_id=report.job_id,
+            state="succeeded" if report.step == "done" else "failed" if report.step == "failed" else "running",
+            step=report.step,
+            message=message[:240],
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        _db_start_last_heartbeat = time.monotonic()
+        if report.step != "requested":
+            _db_start_claimed_job = report.job_id
+        return {**_db_start_job, "accepted": True}

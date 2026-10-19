@@ -16,6 +16,9 @@ param(
     [switch]$StopOnExit,
     [switch]$InstallTask,
     [switch]$UninstallTask,
+    [switch]$InstallHelperTask,
+    [switch]$UninstallHelperTask,
+    [switch]$EnsureExasolOnly,
     [switch]$TaskLog
 )
 
@@ -24,6 +27,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Resolve-Path (Join-Path $here '..\..')
 $stateDir = Join-Path $here '.state'
 $taskName = 'D2C Exasol ngrok Render sync'
+$helperTaskName = 'D2C Exasol helper'
 
 function Get-LocalSetting([string]$Name) {
     $file = Join-Path $here 'local.env'
@@ -79,11 +83,11 @@ function Ensure-ExasolRuntime([string]$HostName, [int]$Port) {
     if ($result.Data.running -eq $true -or $result.Data.status -eq 'running') {
         Write-Host 'Exasol runtime is already running.'
     }
+    elseif ($result.Data.status -eq 'interrupted' -or $result.Data.runtime.status -eq 'interrupted') {
+        throw "Exakit reports an interrupted runtime that needs manual attention. No repair was attempted. 'exakit repair-runtime' rebuilds the deployment and destroys its data; inspect 'exakit status --json' and logs before deciding."
+    }
     elseif (-not $result.Data.installed -or $result.Code -eq 4) {
         throw "Exakit reports that Exasol is not installed. Install it deliberately, then rerun this launcher."
-    }
-    elseif ($result.Data.status -eq 'interrupted' -or $result.Data.runtime.status -eq 'interrupted') {
-        throw "Exakit reports an interrupted runtime. No repair was attempted. 'exakit repair-runtime' rebuilds the deployment and destroys its data; inspect 'exakit status --json' and logs before deciding."
     }
     elseif ($result.Data.status -eq 'stopped' -or $result.Data.runtime.status -eq 'stopped') {
         Write-Host 'Exasol is installed but stopped; starting it with exakit ...'
@@ -150,15 +154,53 @@ function Uninstall-WatchTask {
     }
 }
 
+function Assert-HelperTaskConfiguration {
+    foreach ($name in @('RENDER_API_KEY', 'RENDER_SERVICE_ID', 'HELPER_TOKEN', 'BACKEND_URL')) {
+        $value = Get-Setting $name ''
+        if (-not $value -or $value -match '^REPLACE_WITH_') {
+            throw "Set $name in tools\ngrok_render_sync\local.env (or as a Windows user environment variable) before installing the helper task."
+        }
+    }
+}
+
+function Install-HelperTask {
+    Assert-HelperTaskConfiguration
+    $python = Join-Path $repo '.venv\Scripts\python.exe'
+    if (-not (Test-Path $python)) { $python = (Get-Command python -ErrorAction Stop).Source }
+    $helper = Join-Path $repo 'tools\db_helper\helper.py'
+    $arguments = '"' + $helper + '"'
+    $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $repo.Path
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 2) -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName $helperTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Polls the hosted AdPilot backend for authenticated database-start requests.' -Force | Out-Null
+    Write-Host "Scheduled Task '$helperTaskName' registered for the current user at logon."
+    Write-Host "Helper log: $here\.state\helper-*.log"
+}
+
+function Uninstall-HelperTask {
+    $task = Get-ScheduledTask -TaskName $helperTaskName -ErrorAction SilentlyContinue
+    if ($task) {
+        if ($task.State -eq 'Running') {
+            Stop-ScheduledTask -TaskName $helperTaskName
+        }
+        Unregister-ScheduledTask -TaskName $helperTaskName -Confirm:$false
+        Write-Host "Stopped and removed Scheduled Task '$helperTaskName'. Exasol and any ngrok process are not stopped."
+    }
+    else {
+        Write-Host "Scheduled Task '$helperTaskName' is not registered."
+    }
+}
+
 if ($TaskLog) {
     New-Item -ItemType Directory -Force $stateDir | Out-Null
     $logPath = Join-Path $stateDir ("automation-{0}.log" -f (Get-Date -Format 'yyyyMM'))
     Start-Transcript -Path $logPath -Append | Out-Null
 }
 
-if ($InstallTask -and $UninstallTask) {
+if (($InstallTask -and $UninstallTask) -or ($InstallHelperTask -and $UninstallHelperTask)) {
     if ($TaskLog) { Stop-Transcript | Out-Null }
-    throw 'Choose only one of -InstallTask or -UninstallTask.'
+    throw 'Choose only one install or uninstall task switch.'
 }
 if ($InstallTask) {
     try { Install-WatchTask }
@@ -168,6 +210,29 @@ if ($InstallTask) {
 if ($UninstallTask) {
     try { Uninstall-WatchTask }
     finally { if ($TaskLog) { Stop-Transcript | Out-Null } }
+    exit 0
+}
+if ($InstallHelperTask) {
+    try { Install-HelperTask }
+    finally { if ($TaskLog) { Stop-Transcript | Out-Null } }
+    exit 0
+}
+if ($UninstallHelperTask) {
+    try { Uninstall-HelperTask }
+    finally { if ($TaskLog) { Stop-Transcript | Out-Null } }
+    exit 0
+}
+
+if ($EnsureExasolOnly) {
+    if ($DryRun -or $Wait -or $VerifyUrl -or $Watch -or $ForceDeploy -or $AllowCreate -or $Stop -or $StopOnExit) {
+        throw '-EnsureExasolOnly cannot be combined with sync or stop options.'
+    }
+    $dbHost = Get-Setting 'EXASOL_LOCAL_HOST' '127.0.0.1'
+    $dbPort = 8563
+    if (-not [int]::TryParse((Get-Setting 'EXASOL_LOCAL_PORT' '8563'), [ref]$dbPort) -or $dbPort -lt 1 -or $dbPort -gt 65535) {
+        throw 'EXASOL_LOCAL_PORT must be an integer between 1 and 65535.'
+    }
+    Ensure-ExasolRuntime $dbHost $dbPort
     exit 0
 }
 

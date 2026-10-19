@@ -25,6 +25,8 @@ Alternatively set `RENDER_API_KEY` / `RENDER_SERVICE_ID` as Windows environment 
 |---|---|---|
 | `RENDER_API_KEY` | yes | Render account API key |
 | `RENDER_SERVICE_ID` | yes | The backend web service ID (`srv-...`) |
+| `BACKEND_URL` | yes for the helper | Backend base URL, e.g. `https://your-service.onrender.com` |
+| `HELPER_TOKEN` | yes for the helper | Separate long random token; must match Render's helper-only token |
 | `NGROK_PATH` | no | Full path to `ngrok.exe` if not on PATH |
 | `NGROK_INSPECT_ADDRS` | no | Comma list of ngrok API addresses to probe (default `127.0.0.1:4040,127.0.0.1:4041`) |
 | `EXASOL_LOCAL_HOST` / `EXASOL_LOCAL_PORT` | no | Defaults `127.0.0.1` / `8563` |
@@ -100,9 +102,84 @@ Uninstalling stops only the watcher task; it leaves Exasol and ngrok running. To
 tool owns, separately run `.\tools\ngrok_render_sync\Start-ExasolTunnel.ps1 -Stop`. The tool does not stop
 Exasol; if you want the database stopped, use the Exakit runtime's documented stop command manually.
 
-This is **at logon**, not triggered by each browser page view. The cloud-hosted Vercel app cannot safely start
-processes on your laptop when a visitor opens a page. Your laptop must be powered on, logged in, awake, online,
-and running Exasol/ngrok for the hosted app to query the database.
+The watcher is **at logon**, not triggered by each browser page view. The hosted Start database control uses
+the separate outbound helper described below; the Vercel app never opens an inbound connection to the laptop.
+Your laptop must be powered on, logged in, awake, online, and running Exasol/ngrok for the hosted app to query it.
+
+## Hosted “Start database” button
+
+The Action Center button is shown in CSV demo mode and is one-click: there is no browser admin token. In
+demo mode, the backend queues the job through the helper even if Exasol is already reachable, so the hosted
+service can switch from CSV to live Exasol mode. Outside demo mode, an already reachable database is
+reported without needing the helper. Otherwise it queues a job only when the helper heartbeat is recent.
+The helper polls every 15 seconds using `HELPER_TOKEN`, then:
+
+1. Reports progress and calls this launcher's fixed `-EnsureExasolOnly` mode, which reuses the Exakit status
+   and safe-start logic above. A stopped runtime is started; an `interrupted` runtime is reported as needing
+   manual attention. The helper never calls `exakit repair-runtime`.
+2. Imports `ngrok_render_sync.py` and reuses its `RunLock`, tunnel discovery, Render updates, idempotency/deploy
+   reconciliation, deployment polling, and `/api/db/start/verify` query verification. If Render has
+   `ADPILOT_DEMO_MODE` enabled, the helper sets it to `0` and includes that switch in the same deployment as
+   any `EXASOL_DSN` update.
+3. Reports `requested → starting_exasol → starting_tunnel → updating_render → deploying → verifying → done`
+   (or `failed`). If `EXASOL_DSN` already matches, a Render deployment is skipped and progress says so.
+
+Backend job status is deliberately in memory and resets on a Render redeploy. The helper persists its current
+job in `tools\db_helper\.state\job.json`, continues polling/heartbeating, and retries reports so the new
+backend process can reconstruct current progress. Helper logs are written to
+`tools\db_helper\.state\helper-YYYYMM.log`; messages omit credentials and addresses.
+
+### Helper token and Render configuration
+
+On Render, set a long random `HELPER_TOKEN`. Keep the same value in
+`tools\ngrok_render_sync\local.env` with `BACKEND_URL`, `RENDER_API_KEY`, and `RENDER_SERVICE_ID`.
+`ADPILOT_CORS_ORIGINS` should retain any existing origins. No token is put in the browser bundle. A
+successful hosted database start permanently changes Render's `ADPILOT_DEMO_MODE` to `0`; the browser
+refreshes and reads the live Exasol dataset after the deployment passes the verification query.
+
+Generate a random token locally with:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Use `local.env.example` as the template; environment variables override the file. Set the generated helper
+token to the same value on Render and in `local.env`.
+
+**Public one-click access:** the browser-facing start and status endpoints are intentionally unauthenticated.
+Anyone who can reach the backend can request the fixed start workflow, with a one-request-per-minute limit.
+This starts Exasol/ngrok and may cause a Render deployment when the tunnel address changes. Keep the app
+private/unlisted if that is not acceptable. The helper-only endpoints still require `HELPER_TOKEN`; no
+arbitrary command or argument can be sent from a browser or backend request.
+
+### Install, remove, and run the helper
+
+From the repository root, after configuring `local.env`:
+
+```powershell
+# Per-user Scheduled Task, runs at logon
+.\tools\ngrok_render_sync\Start-ExasolTunnel.ps1 -InstallHelperTask
+
+# Remove the task; Exasol and ngrok are left running
+.\tools\ngrok_render_sync\Start-ExasolTunnel.ps1 -UninstallHelperTask
+
+# Run interactively and stop with Ctrl+C
+.\.venv\Scripts\python.exe .\tools\db_helper\helper.py
+```
+
+The task is named **D2C Exasol helper**, runs for the logged-in Windows user, and restarts on failure. It
+appends logs to `tools\db_helper\.state\helper-YYYYMM.log`. For local UI/API testing, use
+`BACKEND_URL=http://127.0.0.1:8000` and the same test `HELPER_TOKEN` in both the helper environment and local
+backend environment. Set `ADPILOT_DEMO_MODE=1` to show the button in the CSV demo UI. The mocked test suite
+does not contact Render, ngrok, or Exasol:
+
+```powershell
+..\.venv\Scripts\python.exe -m pytest backend\tests tools\ngrok_render_sync\tests
+```
+
+This feature still requires the laptop to be on, awake, online, logged in, and running the helper. A Render
+redeploy can take several minutes. A reserved ngrok TCP address can keep `EXASOL_DSN` unchanged after a
+tunnel restart, avoiding the environment update and deployment; the live database query is still verified.
 
 ## What "success" means
 
@@ -111,6 +188,9 @@ and running Exasol/ngrok for the hosted app to query the database.
 | `Deployment REQUESTED` | Render accepted a deploy request (has an ID) |
 | `Deployment status: live` | The new service version started. **Not** that the database works |
 | `Database query verification: VERIFIED` | Only when `-VerifyUrl` points to `/api/datasets/status`, which runs `SELECT COUNT(*)` on `DQPS.RAW_D2C_DATA` through Render and the tunnel |
+
+The hosted start button uses `/api/db/start/verify`, which reads and validates the full dataset through the
+deployed backend, caches it for the dashboard, and requires the backend to report live Exasol mode.
 
 `/api/health` runs only `SELECT 1`; prefer `/api/datasets/status`. Both return sanitized errors.
 

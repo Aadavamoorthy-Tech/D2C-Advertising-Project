@@ -318,6 +318,12 @@ def test_verify_distinguishes_live_from_query_verified():
     assert nrs.verify_database_query("https://x/api/datasets/status", ok)[0] is True
     bad = lambda *a: (503, {}, b"{}")
     assert nrs.verify_database_query("https://x/api/datasets/status", bad)[0] is False
+    demo = lambda *a: (200, {}, b'{"status":"ready","source":"Exasol","row_count":15000,"mode":"demo"}')
+    assert nrs.verify_database_query("https://x/api/db/start/verify", demo)[0] is False
+    live = lambda *a: (200, {}, b'{"status":"ready","source":"Exasol","row_count":15000,"mode":"live"}')
+    assert nrs.verify_database_query(
+        "https://x/api/db/start/verify", live, require_live_mode=True
+    )[0] is True
 
 
 # ---- concurrency / config ------------------------------------------------------------
