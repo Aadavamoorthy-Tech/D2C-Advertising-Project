@@ -285,21 +285,34 @@ def clean_records(frame: pd.DataFrame, columns: tuple[str, ...]) -> list[dict[st
     return result.to_dict(orient="records")
 
 
+def load_bundled_csv(source: str) -> tuple[pd.DataFrame, str]:
+    if not DEFAULT_CSV.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail="The bundled CSV dataset is unavailable.",
+        )
+    try:
+        return pd.read_csv(DEFAULT_CSV, parse_dates=["date"]), source
+    except (OSError, ValueError, pd.errors.ParserError) as exc:
+        logger.error("Bundled CSV dataset could not be loaded (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="The bundled CSV dataset could not be loaded.",
+        ) from exc
+
+
 def load_frame() -> tuple[pd.DataFrame, str]:
     if DEMO_MODE:
         global demo_frame
         if demo_frame is not None:
             return demo_frame.copy(), "demo_csv"
-        if not DEFAULT_CSV.is_file():
+        try:
+            return load_bundled_csv("demo_csv")
+        except HTTPException as exc:
             raise HTTPException(
                 status_code=503,
-                detail="Explicit demo mode is enabled, but the bundled CSV fixture is missing.",
-            )
-        try:
-            frame = pd.read_csv(DEFAULT_CSV, parse_dates=["date"])
-        except (OSError, ValueError, pd.errors.ParserError) as exc:
-            raise HTTPException(status_code=503, detail=f"Could not load demo CSV: {exc}") from exc
-        return frame, "demo_csv"
+                detail="Explicit demo mode is enabled, but the bundled CSV fixture could not be loaded.",
+            ) from exc
 
     now = time.monotonic()
     with _cache_lock:
@@ -310,17 +323,24 @@ def load_frame() -> tuple[pd.DataFrame, str]:
         try:
             fresh = fetch_exasol_frame()
         except HTTPException as exc:
-            if cached is not None and age < CACHE_MAX_STALE_SECONDS and exc.status_code == 503:
-                logger.warning("Exasol refresh failed; serving cached data aged %.0fs", age)
-                return cached.copy(), "exasol"
-            raise
+            if exc.status_code != 503:
+                raise
+            logger.warning("Exasol unavailable; using the bundled CSV fallback")
+            try:
+                frame, source = load_bundled_csv("csv_fallback")
+            except HTTPException:
+                if cached is not None and age < CACHE_MAX_STALE_SECONDS:
+                    logger.warning("CSV fallback unavailable; serving Exasol cache aged %.0fs", age)
+                    return cached.copy(), "exasol"
+                raise
+            return frame, source
         _cache["frame"] = fresh
         _cache["loaded_at"] = time.monotonic()
         return fresh.copy(), "exasol"
 
 
 def fetch_exasol_frame() -> pd.DataFrame:
-    """Read the full dataset from Exasol; never falls back to the CSV."""
+    """Read the full dataset from Exasol."""
     select_list = ", ".join(f'"{SOURCE_COLUMNS[name]}"' for name in CSV_COLUMNS)
     try:
         with exasol_connection() as conn:
@@ -596,10 +616,15 @@ def health() -> dict[str, Any]:
             conn.execute("SELECT 1").fetchone()
         return {"status": "ok", "mode": "live", "source": "Exasol"}
     except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Exasol is unavailable ({type(exc).__name__}). Check backend configuration.",
-        ) from exc
+        logger.warning("Exasol health check failed (%s); checking CSV fallback", type(exc).__name__)
+        try:
+            load_bundled_csv("csv_fallback")
+        except HTTPException as fallback_exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Exasol is unavailable and the bundled CSV fallback could not be loaded.",
+            ) from fallback_exc
+        return {"status": "ok", "mode": "fallback", "source": "local CSV fallback"}
 
 
 @app.get("/api/datasets/status")
@@ -624,14 +649,23 @@ def dataset_status() -> dict[str, Any]:
             "source": "Exasol",
         }
     except Exception as exc:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "unavailable",
-                "source": "Exasol",
-                "error": f"Connection failed ({type(exc).__name__}); check backend configuration.",
-            },
-        )
+        logger.warning("Exasol dataset status check failed (%s); using CSV fallback", type(exc).__name__)
+        try:
+            frame, _ = load_bundled_csv("csv_fallback")
+        except HTTPException as fallback_exc:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unavailable",
+                    "source": "CSV fallback",
+                    "error": "Exasol is unavailable and the bundled CSV fallback could not be loaded.",
+                },
+            )
+        return {
+            "status": "ready",
+            "row_count": int(len(frame)),
+            "source": "CSV fallback",
+        }
 
 
 @app.post("/api/datasets/ingest")
@@ -739,10 +773,13 @@ def overview(
     for name, group in selected.groupby("channel", dropna=False):
         channels.append({"channel": str(name), **aggregate(group)})
     quality = quality_report(selected)
-    status = dict(demo_status) if DEMO_MODE else {"status": "ready", "row_count": len(frame)}
+    status = dict(demo_status) if source == "demo_csv" else {
+        "status": "ready",
+        "row_count": len(frame),
+    }
     return {
         "source": source,
-        "is_demo": DEMO_MODE,
+        "is_demo": source != "exasol",
         "dataset_status": status,
         "filters": {"channel": channel, "campaign": campaign, "sku": sku, "date_from": date_from, "date_to": date_to},
         "metrics": aggregate(selected),

@@ -1,4 +1,4 @@
-"""Mocked tests: the live dataset loader must use Exasol and never the CSV.
+"""Mocked tests: live loading prefers Exasol and falls back to CSV only if unavailable.
 
 These do not touch a real database. See README for the live read-only check.
 """
@@ -126,31 +126,71 @@ def test_overview_response_shape_from_exasol(exasol):
     assert body["metrics"]["spend"] == pytest.approx(31.5)
 
 
-def test_exasol_down_returns_sanitized_503_without_csv_fallback(exasol):
+def use_bundled_csv_for_fallback(monkeypatch, exasol):
+    monkeypatch.setattr(
+        app_module,
+        "DEFAULT_CSV",
+        Path(__file__).resolve().parents[2] / "engineered_d2c_dataset_15k_v5.csv",
+    )
+    monkeypatch.setattr(
+        pd,
+        "read_csv",
+        lambda *args, **kwargs: pd.DataFrame(exasol["rows"], columns=app_module.CSV_COLUMNS),
+    )
+
+
+def test_exasol_down_falls_back_to_bundled_csv(exasol, monkeypatch):
+    use_bundled_csv_for_fallback(monkeypatch, exasol)
     exasol["fail"] = True
     response = client.get("/api/overview")
-    assert response.status_code == 503
-    text = response.text
-    assert "hunter2" not in text and "ngrok" not in text
-    assert "Exasol data source is unavailable" in text
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "csv_fallback"
+    assert body["is_demo"] is True
+    assert body["metrics"]["record_count"] == 3
 
 
-def test_stale_cache_is_served_only_within_documented_window(exasol, monkeypatch):
+def test_health_reports_csv_fallback_when_exasol_is_down(exasol, monkeypatch):
+    use_bundled_csv_for_fallback(monkeypatch, exasol)
+    exasol["fail"] = True
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "mode": "fallback",
+        "source": "local CSV fallback",
+    }
+
+
+def test_csv_fallback_is_preferred_to_stale_exasol_cache(exasol, monkeypatch):
+    use_bundled_csv_for_fallback(monkeypatch, exasol)
     monkeypatch.setattr(app_module, "CACHE_TTL_SECONDS", 0.0)
     app_module.load_frame()
     exasol["fail"] = True
     frame, source = app_module.load_frame()
-    assert source == "exasol" and len(frame) == 3
-    monkeypatch.setattr(app_module, "CACHE_MAX_STALE_SECONDS", 0.0)
-    with pytest.raises(app_module.HTTPException) as caught:
-        app_module.load_frame()
-    assert caught.value.status_code == 503
+    assert source == "csv_fallback" and len(frame) == 3
 
 
 def test_dataset_status_counts_dqps_table(exasol):
     response = client.get("/api/datasets/status")
     assert response.json() == {"status": "ready", "row_count": 3, "source": "Exasol"}
     assert any("DQPS" in sql for sql in exasol["log"])
+
+
+def test_dataset_status_reports_csv_fallback_when_exasol_is_down(exasol, monkeypatch):
+    use_bundled_csv_for_fallback(monkeypatch, exasol)
+    exasol["fail"] = True
+
+    response = client.get("/api/datasets/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "row_count": 3,
+        "source": "CSV fallback",
+    }
 
 
 def test_live_upload_is_disabled_and_does_not_touch_database(exasol):

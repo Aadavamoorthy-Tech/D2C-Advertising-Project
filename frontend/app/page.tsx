@@ -603,14 +603,20 @@ export default function Home() {
     setPage(1);
   };
   const trendValues = (overview?.trend || []).map((item: Payload) => Number(item.revenue || 0));
-  const sourceLabel = health?.mode === 'demo' ? 'CSV demo' : 'Exasol';
+  const sourceLabel = health?.mode === 'fallback'
+    ? 'CSV fallback'
+    : health?.mode === 'demo'
+      ? 'CSV demo'
+      : 'Exasol';
   const sourceStatus = loading
     ? 'Checking'
-    : health?.mode === 'demo'
-      ? 'Demo'
-      : health?.status === 'ok'
-        ? 'Connected'
-        : 'Offline';
+    : health?.mode === 'fallback'
+      ? 'Fallback'
+      : health?.mode === 'demo'
+        ? 'Demo'
+        : health?.status === 'ok'
+          ? 'Connected'
+          : 'Offline';
   const dataHealthStatus = loading
     ? 'Checking'
     : health?.status !== 'ok'
@@ -649,12 +655,20 @@ export default function Home() {
           : 'No major data-quality issues detected.';
   const dataSourceName = health?.mode === 'live'
     ? 'Exasol'
+    : health?.mode === 'fallback'
+      ? 'Bundled CSV fallback'
     : dataset?.status === 'ready'
       ? 'Uploaded CSV'
       : health?.mode === 'demo'
         ? 'Demo Dataset'
         : 'Unavailable';
-  const connectionStatus = loading ? 'Checking' : health?.status === 'ok' ? 'Connected' : 'Disconnected';
+  const connectionStatus = loading
+    ? 'Checking'
+    : health?.mode === 'fallback'
+      ? 'CSV fallback active'
+      : health?.status === 'ok'
+        ? 'Connected'
+        : 'Disconnected';
   const dataUpdatedAt = dataset?.ingested_at ? new Date(dataset.ingested_at) : lastUpdated;
   const trendDates = (overview?.trend || []).map((item: Payload) => item.date).filter(Boolean);
   const dataRange = trendDates.length
@@ -810,7 +824,7 @@ export default function Home() {
               <button type="button" className="ac-more" onClick={() => goTo('data')}>View Data Details <ArrowRight size={12} /></button>
             </section>
           </div>
-          {health?.mode === 'demo' && <DatabaseStartControl onComplete={refresh} />}
+          {(health?.mode === 'demo' || health?.mode === 'fallback') && <DatabaseStartControl onComplete={refresh} />}
           <p className="ac-note">Insights are based on available campaign data. No live advertising changes are made automatically.</p>
         </>}
 
