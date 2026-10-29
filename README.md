@@ -1,5 +1,7 @@
 # AdPilot D2C Intelligence
 
+The application is available in the link https://d2-c-advertising-project.vercel.app/
+
 A local dashboard for CSV-backed D2C campaign data, deterministic metrics, and AI-generated dataset summaries. The interface follows the dark/lime AdPilot styling in `New folder`; that folder is only a UI reference and is not used as an application dependency.
 
 ## Start locally
