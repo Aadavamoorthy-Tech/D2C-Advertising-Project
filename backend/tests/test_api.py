@@ -18,36 +18,30 @@ client = TestClient(app_module.app)
 
 
 @pytest.fixture(autouse=True)
-def demo_data(monkeypatch):
-    monkeypatch.setattr(app_module, "DEMO_MODE", True)
-    monkeypatch.setattr(app_module, "demo_frame", None)
+def csv_data(monkeypatch):
+    monkeypatch.setattr(app_module, "uploaded_frame", None)
+    monkeypatch.setattr(app_module, "uploaded_status", None)
     monkeypatch.setattr(
         app_module,
         "DEFAULT_CSV",
         Path(__file__).resolve().parents[2] / "engineered_d2c_dataset_15k_v5.csv",
     )
-    monkeypatch.setattr(app_module, "demo_status", {
-        "dataset_id": None,
-        "file_name": "fixture.csv",
-        "row_count": 0,
-        "ingested_at": None,
-        "status": "not_loaded",
-        "duplicate_rows": 0,
-        "warnings": [],
-    })
+    app_module.clear_frame_cache()
+    yield
+    app_module.clear_frame_cache()
 
 
-def test_demo_health_is_explicit():
+def test_health_uses_bundled_csv():
     response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "mode": "demo", "source": "local CSV fixture"}
+    assert response.json() == {"status": "ok", "mode": "csv", "source": "bundled_csv"}
 
 
-def test_overview_uses_real_fixture_and_weighted_ratios():
+def test_overview_uses_bundled_csv_and_weighted_ratios():
     response = client.get("/api/overview")
     assert response.status_code == 200
     result = response.json()
-    assert result["is_demo"] is True
+    assert result["is_demo"] is False
     assert result["metrics"]["record_count"] == 15000
     assert result["metrics"]["roas"] == pytest.approx(
         result["metrics"]["attributed_revenue"] / result["metrics"]["spend"]
@@ -73,7 +67,7 @@ def test_csv_validation_rejects_wrong_schema():
     assert response.status_code == 422
 
 
-def test_valid_csv_upload_in_demo_mode_updates_dataset():
+def test_valid_csv_upload_replaces_active_dataset():
     import io
 
     sample = pd.read_csv(app_module.DEFAULT_CSV, nrows=2)
@@ -85,7 +79,10 @@ def test_valid_csv_upload_in_demo_mode_updates_dataset():
     )
     assert response.status_code == 200
     assert response.json()["row_count"] == 2
-    assert response.json()["source"] == "CSV fixture demo mode"
+    assert response.json()["source"] == "Uploaded CSV"
+    status = client.get("/api/datasets/status")
+    assert status.json()["source"] == "Uploaded CSV"
+    assert status.json()["file_name"] == "sample.csv"
     overview = client.get("/api/overview")
     assert overview.status_code == 200
     assert overview.json()["metrics"]["record_count"] == 2
@@ -93,7 +90,7 @@ def test_valid_csv_upload_in_demo_mode_updates_dataset():
 
 def test_summary_covers_batches_and_excludes_personal_fields(monkeypatch):
     frame = pd.read_csv(app_module.DEFAULT_CSV, parse_dates=["date"]).iloc[:3].copy()
-    monkeypatch.setattr(app_module, "load_frame", lambda: (frame, "demo_csv"))
+    monkeypatch.setattr(app_module, "load_frame", lambda: (frame, "bundled_csv"))
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     requests = []
 
@@ -117,7 +114,7 @@ def test_summary_covers_batches_and_excludes_personal_fields(monkeypatch):
 
 def test_summary_returns_deterministic_fallback_without_openai_key(monkeypatch):
     frame = pd.read_csv(app_module.DEFAULT_CSV, parse_dates=["date"]).iloc[:3].copy()
-    monkeypatch.setattr(app_module, "load_frame", lambda: (frame, "demo_csv"))
+    monkeypatch.setattr(app_module, "load_frame", lambda: (frame, "bundled_csv"))
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setattr(
         app_module,
@@ -375,192 +372,10 @@ def test_budget_scenarios_save_and_send_to_decision_center(monkeypatch, tmp_path
     assert client.get("/api/budget-scenarios").json()["items"][0]["sent"] is True
 
 
-@pytest.fixture
-def helper_api(monkeypatch):
-    import time
-
-    monkeypatch.setattr(app_module, "DEMO_MODE", False)
-    monkeypatch.setenv("HELPER_TOKEN", "test-helper-token")
-    monkeypatch.setattr(app_module, "_exasol_is_reachable", lambda: False)
-    with app_module._db_start_lock:
-        app_module._db_start_job.clear()
-        app_module._db_start_job.update({
-            "job_id": None,
-            "state": "idle",
-            "step": "idle",
-            "message": "Database startup has not been requested.",
-            "updated_at": None,
-        })
-        app_module._db_start_last_heartbeat = time.monotonic()
-        app_module._db_start_last_request = float("-inf")
-        app_module._db_start_claimed_job = None
-        app_module._db_start_claimed_at = 0.0
-    yield
-    with app_module._db_start_lock:
-        app_module._db_start_job.clear()
-        app_module._db_start_job.update({
-            "job_id": None,
-            "state": "idle",
-            "step": "idle",
-            "message": "Database startup has not been requested.",
-            "updated_at": None,
-        })
-        app_module._db_start_last_heartbeat = 0.0
-        app_module._db_start_last_request = float("-inf")
-        app_module._db_start_claimed_job = None
-        app_module._db_start_claimed_at = 0.0
 
 
-def test_database_start_browser_endpoints_are_one_click_without_an_admin_token(helper_api):
-    response = client.post("/api/db/start")
-    assert response.status_code == 202
-    assert response.json()["state"] == "running"
-    assert client.get("/api/db/start/status").status_code == 200
-
-
-def test_database_start_reports_already_running_without_a_helper(helper_api, monkeypatch):
-    monkeypatch.setattr(app_module, "_exasol_is_reachable", lambda: True)
-    status = client.get("/api/db/start/status")
-    assert status.status_code == 200
-    assert status.json()["state"] == "already_running"
-    assert status.json()["message"] == "Database is already running."
-    assert status.json()["helper_online"] is True
-    response = client.post("/api/db/start")
-    assert response.status_code == 200
-    assert response.json()["state"] == "already_running"
-    assert response.json()["step"] == "done"
-    assert response.json()["message"] == "Database is already running."
-    assert response.json()["helper_online"] is True
-
-
-def test_helper_poll_report_contract_and_database_start_state_machine(helper_api):
-    helper = {"Authorization": "Bearer test-helper-token"}
-    assert client.get("/api/helper/poll").status_code == 401
-    assert client.get("/api/helper/poll", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    assert client.post("/api/helper/report", headers={"Authorization": "Bearer wrong"}, json={
-        "job_id": "job-1", "step": "requested", "message": "Starting",
-    }).status_code == 401
-
-    started = client.post("/api/db/start")
-    assert started.status_code == 202
-    job_id = started.json()["job_id"]
-    assert started.json()["step"] == "requested"
-    assert client.post("/api/db/start").json()["job_id"] == job_id
-    invalid = client.post("/api/helper/report", headers=helper, json={
-        "job_id": job_id, "step": "verifying", "message": "Out of order",
-    })
-    assert invalid.status_code == 409
-    assert client.get("/api/helper/poll", headers=helper).json() == {
-        "action": "start", "job_id": job_id,
-    }
-    assert client.get("/api/helper/poll", headers=helper).json() == {"action": "none"}
-
-    steps = (
-        "requested", "starting_exasol", "starting_tunnel", "updating_render",
-        "deploying", "verifying", "done",
-    )
-    for step in steps:
-        response = client.post("/api/helper/report", headers=helper, json={
-            "job_id": job_id, "step": step, "message": f"Progress: {step}",
-        })
-        assert response.status_code == 200, response.text
-    status = client.get("/api/db/start/status")
-    assert status.status_code == 200
-    assert status.json()["state"] == "succeeded"
-    assert status.json()["step"] == "done"
-    assert status.json()["helper_online"] is True
-
-
-def test_start_rate_limit_and_helper_offline_detection(helper_api):
-    helper = {"Authorization": "Bearer test-helper-token"}
-    import time
-
-    app_module._db_start_last_heartbeat = 0.0
-    status = client.get("/api/db/start/status")
-    assert status.json()["helper_online"] is False
-    assert client.post("/api/db/start").status_code == 503
-    assert "helper is offline" in client.post("/api/db/start").json()["detail"].lower()
-
-    app_module._db_start_last_request = time.monotonic() - 61
-    app_module._db_start_last_heartbeat = time.monotonic()
-    started = client.post("/api/db/start")
-    assert started.status_code == 202
-    assert client.post("/api/db/start").status_code == 202
-    failed = client.post("/api/helper/report", headers=helper, json={
-        "job_id": started.json()["job_id"],
-        "step": "failed",
-        "message": "Test failure",
-    })
-    assert failed.status_code == 200
-    assert client.post("/api/db/start").status_code == 429
-    assert client.get("/api/helper/poll", headers=helper).json() == {"action": "none"}
-    assert client.get("/api/db/start/status").json()["helper_online"] is True
-    app_module._db_start_last_heartbeat = time.monotonic() - 46
-    assert client.get("/api/db/start/status").json()["helper_online"] is False
-
-
-def test_helper_report_reconstructs_progress_after_backend_state_reset(helper_api):
-    helper = {"Authorization": "Bearer test-helper-token"}
-    app_module._db_start_job.update(job_id=None, state="idle", step="idle")
-    restored = client.post("/api/helper/report", headers=helper, json={
-        "job_id": "persisted-job", "step": "deploying", "message": "Render deployment in progress.",
-    })
-    assert restored.status_code == 200
-    assert client.get("/api/db/start/status").json()["step"] == "deploying"
-
-
-def test_database_start_workflow_is_available_in_demo_mode(helper_api, monkeypatch):
-    monkeypatch.setattr(app_module, "DEMO_MODE", True)
-    started = client.post("/api/db/start")
-    assert started.status_code == 202
-    assert started.json()["state"] == "running"
-    assert client.get("/api/db/start/status").status_code == 200
-    assert client.get(
-        "/api/helper/poll",
-        headers={"Authorization": "Bearer test-helper-token"},
-    ).json() == {"action": "start", "job_id": started.json()["job_id"]}
-
-
-def test_demo_start_still_queues_helper_when_exasol_is_already_reachable(helper_api, monkeypatch):
-    monkeypatch.setattr(app_module, "DEMO_MODE", True)
-    monkeypatch.setattr(app_module, "_exasol_is_reachable", lambda: True)
-
-    status = client.get("/api/db/start/status")
-    assert status.json()["state"] == "idle"
-
-    started = client.post("/api/db/start")
-    assert started.status_code == 202
-    assert started.json()["state"] == "running"
-    assert client.get(
-        "/api/helper/poll",
-        headers={"Authorization": "Bearer test-helper-token"},
-    ).json() == {"action": "start", "job_id": started.json()["job_id"]}
-
-
-def test_database_start_verification_refuses_demo_mode(helper_api, monkeypatch):
-    monkeypatch.setattr(app_module, "DEMO_MODE", True)
-
-    response = client.get("/api/db/start/verify")
-
-    assert response.status_code == 503
-    assert response.json()["status"] == "demo_mode"
-    assert response.json()["mode"] == "demo"
-
-
-def test_database_start_verification_loads_and_caches_live_dataset(helper_api, monkeypatch):
-    monkeypatch.setattr(app_module, "DEMO_MODE", False)
-    frame = pd.read_csv(app_module.DEFAULT_CSV, parse_dates=["date"]).iloc[:42].copy()
-    monkeypatch.setattr(app_module, "fetch_exasol_frame", lambda: frame)
-    app_module.clear_frame_cache()
-
-    response = client.get("/api/db/start/verify")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "status": "ready",
-        "row_count": 42,
-        "source": "Exasol",
-        "mode": "live",
-    }
-    assert app_module.load_frame()[1] == "exasol"
-    assert len(app_module.load_frame()[0]) == 42
+def test_database_and_helper_routes_are_removed():
+    assert client.get("/api/db/start/status").status_code == 404
+    assert client.post("/api/db/start").status_code == 404
+    assert client.get("/api/helper/poll").status_code == 404
+    assert client.post("/api/helper/report").status_code == 404
