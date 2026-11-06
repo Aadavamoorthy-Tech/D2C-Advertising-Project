@@ -1,6 +1,7 @@
 """Start the AdPilot backend and frontend together. Stop both with Ctrl+C.
 
-Usage: python run_me.py
+Usage: python run_me.py            (CSV demo mode when ADPILOT_DEMO_MODE is not set)
+       python run_me.py --live     (use Exasol; credentials from backend/.env)
 """
 import os
 import shutil
@@ -45,6 +46,8 @@ def main() -> int:
             return 1
 
     env = os.environ.copy()
+    if "--live" not in sys.argv:
+        env.setdefault("ADPILOT_DEMO_MODE", "1")
 
     print("Starting AdPilot (first start can take 10-20 seconds)...", flush=True)
     procs = [

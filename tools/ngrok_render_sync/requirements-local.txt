@@ -1,0 +1,2 @@
+# Local automation needs only the standard library; pytest is for the tests.
+pytest>=8,<9
